@@ -1,6 +1,8 @@
 /* TODO
  * - magari fare una macro che presa una struttura ritorna il rect corrispondente usando pos e size come campi
  * - spawn della stanza per ogni stanza
+ * - componente Transform
+ * - don't quit there are changes (made in BUILDING)
 */
 
 #include <stddef.h>
@@ -101,13 +103,47 @@ typedef enum
     BUILDING
 } GameState;
 
+typedef enum
+{
+    OBJ_NONE = 0,
+    OBJ_PLAYER,
+    OBJ_GROUND,
+    OBJ_WALL,
+    OBJ_DOOR,
+    OBJTYPES_COUNT
+} ObjectType;
+
+static_assert(OBJTYPES_COUNT == 5, "ObjectTypeToString does not cover all object types");
+const char *ObjectTypeToString(ObjectType type)
+{
+    switch (type)
+    {
+    case OBJ_NONE:   return "None";
+    case OBJ_PLAYER: return "Player";
+    case OBJ_GROUND: return "Ground";
+    case OBJ_WALL:   return "Wall";
+    case OBJ_DOOR:   return "Door";
+    default: abort();
+    }
+}
+
+typedef struct
+{
+    bool active;
+    Vector2 *pos;
+    Vector2 *size;
+    size_t index;
+    ObjectType type;
+} SelectedObject;
+
 ///
 
 /// Global Variables
 static GameState game_state = PLAYING;
+static bool modified = false;
 static bool debug = false;
 static bool game_pause = false;
-static Vector2 *dragged_obj = NULL;
+static SelectedObject selected_obj = {0};
 static bool adding_obj = false;
 
 static size_t screen_width = 1920;
@@ -201,11 +237,24 @@ static inline Rectangle rect_from_v2(Vector2 pos, Vector2 size)
 {
     return (Rectangle){.x=pos.x, .y=pos.y, .width=size.x, .height=size.y};
 }
+static inline Rectangle selected_obj_rect(void) { return rect_from_v2(*selected_obj.pos, *selected_obj.size); }
+static inline Rectangle ground_rect(Ground g)   { return rect_from_v2(g.pos, g.size); }
+static inline Rectangle wall_rect(Wall w)       { return rect_from_v2(w.pos, w.size); }
+static inline Rectangle door_rect(Door d)       { return rect_from_v2(d.pos, d.size); }
 
 /// Room Functions
-static inline Rectangle ground_rect(Ground g) { return rect_from_v2(g.pos, g.size); }
-static inline Rectangle wall_rect(Wall w)     { return rect_from_v2(w.pos, w.size); }
-static inline Rectangle door_rect(Door d)     { return rect_from_v2(d.pos, d.size); }
+
+void draw_arrow(int x, int y, int size, Color color, int dir)
+{
+    DrawRectangle(x, y, size, size, color);     
+    switch (dir)
+    {
+    case 0: DrawTriangle((Vector2){x-size/2, y}, (Vector2){x+3*size/2, y}, (Vector2){x+size/2, y-size}, color); break;
+    case 1: DrawTriangle((Vector2){x+size, y-size/2}, (Vector2){x+size, y+3*size/2}, (Vector2){x+2*size, y+size/2}, color); break;
+    case 2: DrawTriangle((Vector2){x-size/2, y+size}, (Vector2){x+size/2, y+2*size}, (Vector2){x+3*size/2, y+size}, color); break;
+    case 3: DrawTriangle((Vector2){x, y+3*size/2}, (Vector2){x, y-size/2}, (Vector2){x-size, y+size/2}, color); break;
+    }
+}
 
 void room_draw()
 {
@@ -220,6 +269,7 @@ void room_draw()
     for (size_t i = 0; i < CURRENT_ROOM->doors.count; i++) { 
         const Door *d = &CURRENT_ROOM->doors.items[i];
         DrawRectangleRec(door_rect(*d), RED);
+        draw_arrow(d->pos.x + (d->spawn_left ? -20 : d->size.x + 10), d->pos.y+d->size.y/2-5, 10, RED, d->spawn_left ? 3 : 1);
         char buffer[32] = {0};
         sprintf(buffer, "%zu", i);
         DrawText(buffer, d->pos.x + 10, d->pos.y + 10, 20, DARKBROWN);
@@ -356,7 +406,6 @@ void player_check_move_through_door(void)
 
     current_room = new_room;
 
-
     if (d_to->spawn_left)
         player.pos = (Vector2){d_to->pos.x - player.size.x - 10.f,  d_to->pos.y + d_to->size.y - player.size.y};
     else
@@ -393,9 +442,33 @@ void camera_update(void)
 }
 ///
 
+void check_unsaved_changes(void)
+{
+    modified = true;
+
+    if (modified) {
+        printf("\nWARNING: You have unsaved changes, wanna save? [Y/N]\n");
+        int c = getchar();
+        while (c != 'Y' && c != 'N') {
+            c = getchar();
+        }
+        if (c == 'Y') save_rooms();
+    }
+}
+
+// TODO: non funziona perche' viene chiuso stdin?
+void sigint_handler(int signo)
+{
+    UNUSED(signo);
+    check_unsaved_changes();
+    CloseWindow();
+}
+
 /// Game Initialization
 void game_init(void)
 {
+    signal(SIGINT, sigint_handler);
+
     screen_width = GetScreenWidth();
     screen_height = GetScreenHeight();
 
@@ -412,7 +485,6 @@ void building_mode(void)
 {
     if (IsKeyPressed(KEY_A)) {
         adding_obj = !adding_obj;
-        TraceLog(LOG_INFO, "%s add obj mode", adding_obj ? "Entering" : "Exiting");
     } else if (adding_obj) {
         switch (GetKeyPressed())
         {
@@ -436,6 +508,7 @@ void building_mode(void)
             // TODO: add mechanism to change:
             // - spawning direction
             // - room connection
+            // >> sarebbe carino che quando si seleziona un oggetto si possono modificare i suoi valori
         } break;
         case KEY_R: {
             current_room = rooms.count;
@@ -446,39 +519,94 @@ void building_mode(void)
         if (IsKeyPressed(KEY_S)) save_rooms();
         else if (IsKeyPressed(KEY_P) && current_room+1 < rooms.count) current_room++;
         else if (IsKeyPressed(KEY_N) && current_room > 0) current_room--;
-    } else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        Vector2 mouse = GetMousePositionRelativeToCamera();
-        if (CheckCollisionPointRec(mouse, player_rect())) {
-            dragged_obj = &player.pos;
-        } else {
-            for (size_t i = 0; i < CURRENT_ROOM->grounds.count; i++) {
-                if (CheckCollisionPointRec(mouse, ground_rect(CURRENT_ROOM->grounds.items[i]))) {
-                    dragged_obj = &CURRENT_ROOM->grounds.items[i].pos;
-                    break;
-                }
-            }
-            if (dragged_obj == NULL) {
-                for (size_t i = 0; i < CURRENT_ROOM->walls.count; i++) {
-                    if (CheckCollisionPointRec(mouse, wall_rect(CURRENT_ROOM->walls.items[i]))) {
-                        dragged_obj = &CURRENT_ROOM->walls.items[i].pos;
+        else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            selected_obj.active = false;
+            Vector2 mouse = GetMousePositionRelativeToCamera();
+            if (CheckCollisionPointRec(mouse, player_rect())) {
+                selected_obj.active = true;
+                selected_obj.type = OBJ_PLAYER;
+                selected_obj.pos = &player.pos;
+                selected_obj.size = &player.size;
+            } else {
+                for (size_t i = 0; i < CURRENT_ROOM->grounds.count; i++) {
+                    Ground *g = &CURRENT_ROOM->grounds.items[i];
+                    if (CheckCollisionPointRec(mouse, ground_rect(*g))) {
+                        selected_obj.active = true;
+                        selected_obj.type = OBJ_GROUND;
+                        selected_obj.pos = &g->pos;
+                        selected_obj.size = &g->size;
+                        selected_obj.index = i;
                         break;
                     }
                 }
-            }
-            if (dragged_obj == NULL) {
-                for (size_t i = 0; i < CURRENT_ROOM->doors.count; i++) {
-                    if (CheckCollisionPointRec(mouse, door_rect(CURRENT_ROOM->doors.items[i]))) {
-                        dragged_obj = &CURRENT_ROOM->doors.items[i].pos;
-                        break;
+
+                if (!selected_obj.active) {
+                    for (size_t i = 0; i < CURRENT_ROOM->walls.count; i++) {
+                        Wall *w = &CURRENT_ROOM->walls.items[i];
+                        if (CheckCollisionPointRec(mouse, wall_rect(*w))) {
+                            selected_obj.active = true;
+                            selected_obj.type = OBJ_WALL;
+                            selected_obj.pos = &w->pos;
+                            selected_obj.size = &w->size;
+                            selected_obj.index = i;
+                            break;
+                        }
                     }
                 }
+
+                if (!selected_obj.active) {
+                    for (size_t i = 0; i < CURRENT_ROOM->doors.count; i++) {
+                        Door *d = &CURRENT_ROOM->doors.items[i];
+                        if (CheckCollisionPointRec(mouse, door_rect(*d))) {
+                            selected_obj.active = true;
+                            selected_obj.type = OBJ_DOOR;
+                            selected_obj.pos = &d->pos;
+                            selected_obj.size = &d->size;
+                            selected_obj.index = i;
+                            break;
+                        }
+                    }
+                }
+
             }
         }
-    } else if (dragged_obj && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-        *dragged_obj = GetMousePositionRelativeToCamera();
-    } else if (dragged_obj && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-        *dragged_obj = GetMousePositionRelativeToCamera();
-        dragged_obj = NULL;
+    } else if (selected_obj.active) {
+        Vector2 mouse = GetMousePositionRelativeToCamera();
+        if (CheckCollisionPointRec(mouse, selected_obj_rect())) {
+            // TODO: prevent the object from vanishing from reality by setting a minimum size and a position boundary
+            if (IsKeyDown(KEY_LEFT_SHIFT)) {
+                SetMouseCursor(MOUSE_CURSOR_RESIZE_EW);
+                if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+                    *selected_obj.size = Vector2Add(*selected_obj.size, GetMouseDelta());
+            } else {
+                SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
+                if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+                    *selected_obj.pos = Vector2Add(*selected_obj.pos, GetMouseDelta());
+                    //*selected_obj.pos = GetMousePositionRelativeToCamera();
+            }
+        } else {
+            SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+        }
+        if (IsKeyPressed(KEY_D)) { // TODO: maybe a way to undo it?
+            switch (selected_obj.type) {
+            case OBJ_GROUND: {
+                Ground g; UNUSED(g);
+                da_remove(&CURRENT_ROOM->grounds, selected_obj.index, g);
+                selected_obj.active = false;
+            } break;
+            case OBJ_WALL: {
+                Wall w; UNUSED(w);
+                da_remove(&CURRENT_ROOM->walls, selected_obj.index, w);
+                selected_obj.active = false;
+            } break;
+            case OBJ_DOOR: {
+                Door d; UNUSED(d);
+                da_remove(&CURRENT_ROOM->doors, selected_obj.index, d);
+                selected_obj.active = false;
+            } break;
+            default: TraceLog(LOG_INFO, "Cannot delete objects of type `%s`", ObjectTypeToString(selected_obj.type));
+            }
+        }
     }
 }
 ///
@@ -496,14 +624,20 @@ int main(void)
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
 
+        if (IsKeyPressed(KEY_ESCAPE)) {
+            TraceLog(LOG_INFO, "E' stato bello");
+            if (modified) continue;
+        }
+            
         if (!adding_obj && IsKeyPressed(KEY_D)) debug = !debug;
         if (!(IsKeyDown(KEY_LEFT_CONTROL)) && IsKeyPressed(KEY_P)) game_pause = !game_pause;
         if (IsKeyPressed(KEY_B)) {
-            if (game_state == BUILDING) game_state = PLAYING;
-            else if (game_state == PLAYING) game_state = BUILDING;
+            if (game_state == BUILDING) {
+                camera.zoom = 1.f;
+                game_state = PLAYING;
+            } else if (game_state == PLAYING) game_state = BUILDING;
         }
 
-        // TODO: factor out this block
         if (game_state == BUILDING) {
             building_mode();
         }
@@ -518,6 +652,13 @@ int main(void)
 
         room_draw();
         player_draw();
+
+        if (game_state == BUILDING) {
+            if (selected_obj.active) {
+                DrawRectangleLinesEx((Rectangle){selected_obj.pos->x, selected_obj.pos->y, selected_obj.size->x, selected_obj.size->y}, 2, BLACK);
+                DrawRectangleLinesEx((Rectangle){selected_obj.pos->x, selected_obj.pos->y, selected_obj.size->x, selected_obj.size->y}, 1, RED);
+            }
+        }
 
         EndMode2D();
 
@@ -560,5 +701,8 @@ int main(void)
     }
 
     CloseWindow();
+
+    check_unsaved_changes();
+
     return 0;
 }
