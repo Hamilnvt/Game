@@ -56,6 +56,7 @@ typedef struct
     Vector2 pos;
     Vector2 size;
     size_t takes_to;
+    bool spawn_left;
 } Door;
 typedef struct {
     Door *items;
@@ -81,14 +82,14 @@ typedef enum
     DIR_LEFT = -1,
     DIR_FRONT = 0,
     DIR_RIGHT = 1
-} Direction;
+} MoveDirection;
 
 typedef struct
 {
     Vector2 pos;
     Vector2 size;
     Vector2 vel;
-    Direction direction;
+    MoveDirection direction;
 
     bool moving;
     bool jumping;
@@ -107,6 +108,7 @@ static GameState game_state = PLAYING;
 static bool debug = false;
 static bool game_pause = false;
 static Vector2 *dragged_obj = NULL;
+static bool adding_obj = false;
 
 static size_t screen_width = 1920;
 static size_t screen_height = 1280;
@@ -118,20 +120,16 @@ static const float gravity = 981.f;
 /// Rooms
 static size_t current_room = 0;
 Rooms rooms = {0};
-static inline const Room *get_room(size_t n) { return &rooms.items[n]; }
+static inline Room *get_room(size_t n) { return &rooms.items[n]; }
 #define CURRENT_ROOM (get_room(current_room))
-#define ROOMS_FILEPATH "./rooms.h"
+#define ROOMS_FILEPATH "./rooms.c"
 #include ROOMS_FILEPATH
 
 void save_rooms(void)
 {
-    TraceLog(LOG_INFO, "Saving rooms...");
-
     Nob_String_Builder sb = {0}; 
     nob_sb_append_cstr(&sb, "void load_rooms(void)\n");
     nob_sb_append_cstr(&sb, "{\n");
-
-    nob_sb_append_cstr(&sb, "    TraceLog(LOG_INFO, \"In load rooms\");\n");
 
     nob_sb_append_cstr(&sb, "    Room r;\n");
     nob_sb_append_cstr(&sb, "\n");
@@ -171,13 +169,14 @@ void save_rooms(void)
         if (!da_is_empty(&r->doors)) {
             nob_sb_append_cstr(&sb,     "        // Doors\n");
             for (size_t d = 0; d < r->doors.count; d++) {
-                nob_sb_appendf(&sb, "        da_push(&r.doors, ((Door){{%f,%f},{%f,%f}, %zu}));\n",
+                nob_sb_appendf(&sb, "        da_push(&r.doors, ((Door){{%f,%f},{%f,%f}, %zu, %s}));\n",
                         r->doors.items[d].pos.x,
                         r->doors.items[d].pos.y,
                         r->doors.items[d].size.x,
                         r->doors.items[d].size.y,
-                        r->doors.items[d].takes_to
-                        );
+                        r->doors.items[d].takes_to,
+                        r->doors.items[d].spawn_left ? "true" : "false"
+                );
             }
             nob_sb_append_cstr(&sb, "        da_fit(&r.doors);\n");
         }
@@ -187,9 +186,6 @@ void save_rooms(void)
     }
 
     nob_sb_append_cstr(&sb, "    da_fit(&rooms);\n\n");
-    nob_sb_append_cstr(&sb, "    da_free(&r.grounds);\n");
-    nob_sb_append_cstr(&sb, "    da_free(&r.walls);\n");
-    nob_sb_append_cstr(&sb, "    da_free(&r.doors);\n");
     nob_sb_append_cstr(&sb, "}\n");
 
     if (!nob_write_entire_file(ROOMS_FILEPATH, sb.items, sb.count)) {
@@ -197,6 +193,7 @@ void save_rooms(void)
     }
 
     TraceLog(LOG_INFO, "Saved rooms to %s", ROOMS_FILEPATH);
+    nob_sb_free(sb);
 }
 
 /// Collisions
@@ -221,7 +218,14 @@ void room_draw()
     }
 
     for (size_t i = 0; i < CURRENT_ROOM->doors.count; i++) { 
-        DrawRectangleRec(door_rect(CURRENT_ROOM->doors.items[i]), RED);
+        const Door *d = &CURRENT_ROOM->doors.items[i];
+        DrawRectangleRec(door_rect(*d), RED);
+        char buffer[32] = {0};
+        sprintf(buffer, "%zu", i);
+        DrawText(buffer, d->pos.x + 10, d->pos.y + 10, 20, DARKBROWN);
+        memset(buffer, 0, sizeof(buffer));
+        sprintf(buffer, "> %zu", d->takes_to);
+        DrawText(buffer, d->pos.x + 10, d->pos.y + 30, 20, DARKBROWN);
     }
 }
 ///
@@ -332,18 +336,37 @@ void player_move_and_collide_x(float dt)
 
 void player_check_move_through_door(void)
 {
-    Door *d = player_check_door_collision();
-    if (!d) return;
-    current_room = d->takes_to;
-    player.pos = (Vector2){screen_width/2, player.size.y + 10.0};
+    Door *d_from = player_check_door_collision();
+    if (!d_from) return;
+    size_t new_room = d_from->takes_to;
 
-    TraceLog(LOG_INFO, "Grounds count: %zu", CURRENT_ROOM->grounds.count);
-    TraceLog(LOG_INFO, "ground[0]: pos=(%.2f,%.2f), size=(%.2f,%.2f)",
-                        CURRENT_ROOM->grounds.items[0].pos.x,
-                        CURRENT_ROOM->grounds.items[0].pos.y,
-                        CURRENT_ROOM->grounds.items[0].size.x,
-                        CURRENT_ROOM->grounds.items[0].size.y);
-    TraceLog(LOG_INFO, "Walls   count: %zu", CURRENT_ROOM->walls.count);
+    // TODO: maybe store this information in the door itself?
+    Door *d_to = NULL;
+    for (size_t i = 0; i < get_room(new_room)->doors.count; i++) {
+        if (get_room(new_room)->doors.items[i].takes_to == current_room) {
+            d_to = &get_room(new_room)->doors.items[i];
+            break;
+        }
+    }
+
+    if (d_to == NULL) {
+        TraceLog(LOG_WARNING, "No door connection from %zu to %zu", current_room, new_room);
+        return;
+    }
+
+    current_room = new_room;
+
+
+    if (d_to->spawn_left)
+        player.pos = (Vector2){d_to->pos.x - player.size.x - 10.f,  d_to->pos.y + d_to->size.y - player.size.y};
+    else
+        player.pos = (Vector2){d_to->pos.x + d_to->size.x  + 10.f,  d_to->pos.y + d_to->size.y - player.size.y};
+
+    player.direction = d_to->spawn_left ? DIR_LEFT : DIR_RIGHT;
+    player.moving = false;
+    player.jumping = false;
+    player.vel.y = 0.f;
+    // TODO: timer for not receiving inputs
 }
 
 void player_update(float dt)
@@ -354,7 +377,6 @@ void player_update(float dt)
     player_check_move_through_door();
 }
 
-// TODO: move the camera freely in BUILDING
 void camera_update(void)
 {
     if (game_state == BUILDING) {
@@ -385,10 +407,87 @@ void game_init(void)
 }
 ///
 
+/// Modes
+void building_mode(void)
+{
+    if (IsKeyPressed(KEY_A)) {
+        adding_obj = !adding_obj;
+        TraceLog(LOG_INFO, "%s add obj mode", adding_obj ? "Entering" : "Exiting");
+    } else if (adding_obj) {
+        switch (GetKeyPressed())
+        {
+        case KEY_G: {
+            Ground g = {0};
+            g.pos = GetMousePositionRelativeToCamera();
+            g.size = (Vector2){100, 50};
+            da_push(&CURRENT_ROOM->grounds, g); 
+        } break;
+        case KEY_W: {
+            Wall w = {0};
+            w.pos = GetMousePositionRelativeToCamera();
+            w.size = (Vector2){50, 100};
+            da_push(&CURRENT_ROOM->walls, w); 
+        } break;
+        case KEY_D: {
+            Door d = {0};
+            d.pos = GetMousePositionRelativeToCamera();
+            d.size = (Vector2){50, 100};
+            da_push(&CURRENT_ROOM->doors, d); 
+            // TODO: add mechanism to change:
+            // - spawning direction
+            // - room connection
+        } break;
+        case KEY_R: {
+            current_room = rooms.count;
+            da_push(&rooms, ((Room){0}));
+        } break;
+        }
+    } else if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) {
+        if (IsKeyPressed(KEY_S)) save_rooms();
+        else if (IsKeyPressed(KEY_P) && current_room+1 < rooms.count) current_room++;
+        else if (IsKeyPressed(KEY_N) && current_room > 0) current_room--;
+    } else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        Vector2 mouse = GetMousePositionRelativeToCamera();
+        if (CheckCollisionPointRec(mouse, player_rect())) {
+            dragged_obj = &player.pos;
+        } else {
+            for (size_t i = 0; i < CURRENT_ROOM->grounds.count; i++) {
+                if (CheckCollisionPointRec(mouse, ground_rect(CURRENT_ROOM->grounds.items[i]))) {
+                    dragged_obj = &CURRENT_ROOM->grounds.items[i].pos;
+                    break;
+                }
+            }
+            if (dragged_obj == NULL) {
+                for (size_t i = 0; i < CURRENT_ROOM->walls.count; i++) {
+                    if (CheckCollisionPointRec(mouse, wall_rect(CURRENT_ROOM->walls.items[i]))) {
+                        dragged_obj = &CURRENT_ROOM->walls.items[i].pos;
+                        break;
+                    }
+                }
+            }
+            if (dragged_obj == NULL) {
+                for (size_t i = 0; i < CURRENT_ROOM->doors.count; i++) {
+                    if (CheckCollisionPointRec(mouse, door_rect(CURRENT_ROOM->doors.items[i]))) {
+                        dragged_obj = &CURRENT_ROOM->doors.items[i].pos;
+                        break;
+                    }
+                }
+            }
+        }
+    } else if (dragged_obj && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        *dragged_obj = GetMousePositionRelativeToCamera();
+    } else if (dragged_obj && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+        *dragged_obj = GetMousePositionRelativeToCamera();
+        dragged_obj = NULL;
+    }
+}
+///
+
 /// Main
 int main(void)
 {
     InitWindow(800, 600, "MyGame");
+    SetWindowState(/*FLAG_FULLSCREEN_MODE | */FLAG_WINDOW_RESIZABLE);
     SetTargetFPS(60);
 
     game_init();
@@ -397,45 +496,16 @@ int main(void)
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
 
-        if (IsKeyPressed(KEY_D)) debug = !debug;
-        if (IsKeyPressed(KEY_P)) game_pause = !game_pause;
+        if (!adding_obj && IsKeyPressed(KEY_D)) debug = !debug;
+        if (!(IsKeyDown(KEY_LEFT_CONTROL)) && IsKeyPressed(KEY_P)) game_pause = !game_pause;
         if (IsKeyPressed(KEY_B)) {
             if (game_state == BUILDING) game_state = PLAYING;
             else if (game_state == PLAYING) game_state = BUILDING;
         }
 
-        // TODO: factor out
+        // TODO: factor out this block
         if (game_state == BUILDING) {
-            if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) {
-                if (IsKeyPressed(KEY_S)) save_rooms();
-                else if (IsKeyPressed(KEY_P) && current_room+1 < rooms.count) current_room++;
-                else if (IsKeyPressed(KEY_N) && current_room > 0) current_room--;
-            } else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                Vector2 mouse = GetMousePositionRelativeToCamera();
-                if (CheckCollisionPointRec(mouse, player_rect())) {
-                    dragged_obj = &player.pos;
-                } else {
-                    for (size_t i = 0; i < CURRENT_ROOM->grounds.count; i++) {
-                        if (CheckCollisionPointRec(mouse, ground_rect(CURRENT_ROOM->grounds.items[i]))) {
-                            dragged_obj = &CURRENT_ROOM->grounds.items[i].pos;
-                            break;
-                        }
-                    }
-                    if (dragged_obj == NULL) {
-                        for (size_t i = 0; i < CURRENT_ROOM->walls.count; i++) {
-                            if (CheckCollisionPointRec(mouse, wall_rect(CURRENT_ROOM->walls.items[i]))) {
-                                dragged_obj = &CURRENT_ROOM->walls.items[i].pos;
-                                break;
-                            }
-                        }
-                    }
-                }
-            } else if (dragged_obj && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-                *dragged_obj = GetMousePositionRelativeToCamera();
-            } else if (dragged_obj && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-                *dragged_obj = GetMousePositionRelativeToCamera();
-                dragged_obj = NULL;
-            }
+            building_mode();
         }
 
         if (!game_pause) player_update(dt);
@@ -448,8 +518,6 @@ int main(void)
 
         room_draw();
         player_draw();
-
-        DrawLine(0, screen_height, screen_width, screen_height, BLACK);
 
         EndMode2D();
 
@@ -474,7 +542,19 @@ int main(void)
         }
         if (game_state == BUILDING) {
             DrawText("BUILDING", screen_width-100, 50, 20, BLACK);
+            if (adding_obj) {
+                size_t line = 1;
+                DrawText("room (r)", 10, screen_height - 25*line++, 20, BLACK);
+                DrawText("door (d)", 10, screen_height - 25*line++, 20, BLACK);
+                DrawText("wall (w)", 10, screen_height - 25*line++, 20, BLACK);
+                DrawText("ground (g)", 10, screen_height - 25*line++, 20, BLACK);
+                DrawText("ADD",        10, screen_height - 25*line++, 20, BLACK);
+            }
         }
+
+        char buffer[64];
+        sprintf(buffer, "Room %zu", current_room);
+        DrawText(buffer, screen_width-100, screen_height-25, 20, BLACK);
 
         EndDrawing();
     }
