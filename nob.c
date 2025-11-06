@@ -13,8 +13,9 @@ int main(int argc, char **argv)
     if (!nob_mkdir_if_not_exists(BUILD_FOLDER)) return 1;
 
     cmd_append(&cmd, "cc", "-o", BUILD_FOLDER"platform", "main.c");
+    //cmd_append(&cmd, "-O2");
     cmd_append(&cmd, "-Wall", "-Wextra", "-Werror");
-    cmd_append(&cmd, "-lraylib", "-lm", "-L~/Coding/raylib/raylib-5.5_linux_amd64/include");
+    cmd_append(&cmd, "-lraylib", "-lm");
     if (!cmd_run(&cmd)) return 1;
 
     cmd_append(&cmd, BUILD_FOLDER"platform");
