@@ -1,17 +1,11 @@
-/* TODO
- * - magari fare una macro che presa una struttura ritorna il rect corrispondente usando pos e size come campi
- * - spawn della stanza per ogni stanza
- * - componente Transform
- * - don't quit there are changes (made in BUILDING)
-*/
-
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include "raylib.h"
 #include "raymath.h"
-#include "/home/mathieu/Coding/C/libs/dynamic_arrays.h"
+#include "thirdparties/cJSON/cJSON.h"
+#include "dynamic_arrays.h"
 
 #define NOB_IMPLEMENTATION
 #include "nob.h"
@@ -35,6 +29,7 @@ typedef struct
     Vector2 pos;
     Vector2 size;
 } Block;
+
 typedef struct {
     Block *items;
     size_t count;
@@ -48,6 +43,17 @@ typedef struct
     size_t takes_to;
     bool spawn_left;
 } Door;
+
+static inline Door door_create(float posx, float posy, float sizex, float sizey, size_t takes_to, bool spawn_left)
+{
+    return (Door){
+        .pos        = (Vector2){posx, posy},
+        .size       = (Vector2){sizex, sizey},
+        .takes_to   = takes_to,
+        .spawn_left = spawn_left
+    };
+}
+
 typedef struct {
     Door *items;
     size_t count;
@@ -146,63 +152,154 @@ static size_t current_room = 0;
 Rooms rooms = {0};
 static inline Room *get_room(size_t n) { return &rooms.items[n]; }
 #define CURRENT_ROOM (get_room(current_room))
-#define ROOMS_FILEPATH "./rooms.c"
-#include ROOMS_FILEPATH
+#define ROOMS_JSON_FILEPATH "./rooms.json"
 
-void save_rooms(void)
+bool save_rooms_to_json(void)
 {
-    Nob_String_Builder sb = {0}; 
-    nob_sb_append_cstr(&sb, "void load_rooms(void)\n");
-    nob_sb_append_cstr(&sb, "{\n");
-
-    nob_sb_append_cstr(&sb, "    Room r;\n");
-    nob_sb_append_cstr(&sb, "\n");
+    cJSON *root = cJSON_CreateArray();
+    if (!root) return false;
 
     for (size_t i = 0; i < rooms.count; i++) {
-        const Room *r = get_room(i);
-        nob_sb_appendf(&sb,     "    // Room %zu\n", i);
-        nob_sb_append_cstr(&sb, "    {\n");
-        nob_sb_append_cstr(&sb, "        r = (Room){0};\n");
+        Room room = rooms.items[i];
+        cJSON *jroom = cJSON_CreateObject();
+        cJSON_AddItemToArray(root, jroom);
 
-        if (!da_is_empty(&r->blocks)) {
-            nob_sb_append_cstr(&sb,     "        // Blocks\n");
-            for (size_t w = 0; w < r->blocks.count; w++) {
-                nob_sb_appendf(&sb, "        da_push(&r.blocks, ((Block){{%f,%f},{%f,%f}}));\n",
-                        r->blocks.items[w].pos.x,
-                        r->blocks.items[w].pos.y,
-                        r->blocks.items[w].size.x,
-                        r->blocks.items[w].size.y
-                        );
-            }
-            nob_sb_append_cstr(&sb, "        da_fit(&r.blocks);\n");
+        cJSON *blocks = cJSON_CreateArray();
+        cJSON_AddItemToObject(jroom, "blocks", blocks);
+        for (size_t i = 0; i < room.blocks.count; ++i) {
+            const Block *b = &room.blocks.items[i];
+            cJSON *jb = cJSON_CreateObject();
+
+            cJSON *jbpos = cJSON_CreateObject();
+            cJSON_AddNumberToObject(jbpos, "x",    b->pos.x);
+            cJSON_AddNumberToObject(jbpos, "y",    b->pos.y);
+            cJSON_AddItemToObject(jb, "pos", jbpos);
+
+            cJSON *jbsize = cJSON_CreateObject();
+            cJSON_AddNumberToObject(jbsize, "x",    b->size.x);
+            cJSON_AddNumberToObject(jbsize, "y",    b->size.y);
+            cJSON_AddItemToObject(jb, "size", jbsize);
+
+            cJSON_AddItemToArray(blocks, jb);
         }
 
-        if (!da_is_empty(&r->doors)) {
-            nob_sb_append_cstr(&sb,     "        // Doors\n");
-            for (size_t d = 0; d < r->doors.count; d++) {
-                nob_sb_appendf(&sb, "        da_push(&r.doors, ((Door){{%f,%f},{%f,%f}, %zu, %s}));\n",
-                        r->doors.items[d].pos.x,
-                        r->doors.items[d].pos.y,
-                        r->doors.items[d].size.x,
-                        r->doors.items[d].size.y,
-                        r->doors.items[d].takes_to,
-                        r->doors.items[d].spawn_left ? "true" : "false"
-                );
-            }
-            nob_sb_append_cstr(&sb, "        da_fit(&r.doors);\n");
-        }
+        cJSON *doors = cJSON_CreateArray();
+        cJSON_AddItemToObject(jroom, "doors", doors);
+        for (size_t i = 0; i < room.doors.count; ++i) {
+            const Door *d = &room.doors.items[i];
+            cJSON *jd = cJSON_CreateObject();
 
-        nob_sb_append_cstr(&sb, "\n        da_push(&rooms, r);\n");
-        nob_sb_append_cstr(&sb, "    }\n\n");
+            cJSON *jdpos = cJSON_CreateObject();
+            cJSON_AddNumberToObject(jdpos, "x",    d->pos.x);
+            cJSON_AddNumberToObject(jdpos, "y",    d->pos.y);
+            cJSON_AddItemToObject(jd, "pos", jdpos);
+
+            cJSON *jdsize = cJSON_CreateObject();
+            cJSON_AddNumberToObject(jdsize, "x",    d->size.x);
+            cJSON_AddNumberToObject(jdsize, "y",    d->size.y);
+            cJSON_AddItemToObject(jd, "size", jdsize);
+
+            cJSON_AddNumberToObject(jd, "takes_to",    d->takes_to);
+            cJSON_AddBoolToObject(jd, "spawn_left",    d->spawn_left);
+
+            cJSON_AddItemToArray(doors, jd);
+        }
     }
 
-    nob_sb_append_cstr(&sb, "    da_fit(&rooms);\n\n");
-    nob_sb_append_cstr(&sb, "}\n");
+    char *printed = cJSON_Print(root); // pretty print, use cJSON_PrintUnformatted for compact
+    cJSON_Delete(root);
+    if (!printed) return false;
 
-    nob_write_entire_file(ROOMS_FILEPATH, sb.items, sb.count);
+    bool ok = nob_write_entire_file(ROOMS_JSON_FILEPATH, printed, strlen(printed));
+    free(printed);
+    return ok;
+}
 
-    TraceLog(LOG_INFO, "Saved rooms to %s", ROOMS_FILEPATH);
+Block parse_json_block(cJSON *jb) {
+    Block b = {0};
+
+    cJSON *jbpos = cJSON_GetObjectItemCaseSensitive(jb, "pos");
+    b.pos.x  = (float)cJSON_GetObjectItemCaseSensitive(jbpos, "x")->valuedouble;
+    b.pos.y  = (float)cJSON_GetObjectItemCaseSensitive(jbpos, "y")->valuedouble;
+
+    cJSON *jbsize = cJSON_GetObjectItemCaseSensitive(jb, "size");
+    b.size.x = (float)cJSON_GetObjectItemCaseSensitive(jbsize, "x")->valuedouble;
+    b.size.y = (float)cJSON_GetObjectItemCaseSensitive(jbsize, "y")->valuedouble;
+
+    return b;
+}
+
+Door parse_json_door(cJSON *jd) {
+    Door d = {0};
+
+    cJSON *jdpos = cJSON_GetObjectItemCaseSensitive(jd, "pos");
+    d.pos.x  = (float)cJSON_GetObjectItemCaseSensitive(jdpos, "x")->valuedouble;
+    d.pos.y  = (float)cJSON_GetObjectItemCaseSensitive(jdpos, "y")->valuedouble;
+
+    cJSON *jdsize = cJSON_GetObjectItemCaseSensitive(jd, "size");
+    d.size.x = (float)cJSON_GetObjectItemCaseSensitive(jdsize, "x")->valuedouble;
+    d.size.y = (float)cJSON_GetObjectItemCaseSensitive(jdsize, "y")->valuedouble;
+
+    d.takes_to = (size_t)cJSON_GetObjectItemCaseSensitive(jd, "takes_to")->valuedouble;
+    d.spawn_left = (bool)cJSON_GetObjectItemCaseSensitive(jd, "spawn_left")->valuedouble;
+
+    return d;
+}
+
+bool load_rooms_from_json(void) {
+    Nob_String_Builder sb = {0};
+    if (!nob_read_entire_file(ROOMS_JSON_FILEPATH, &sb)) return false;
+    nob_sb_append_null(&sb);
+
+    cJSON *jrooms = cJSON_Parse(sb.items);
     nob_sb_free(sb);
+    if (!jrooms) {
+        TraceLog(LOG_WARNING, "JSON parse error\n");
+        return false;
+    }
+
+    rooms = (Rooms){0};
+    int rooms_count = cJSON_GetArraySize(jrooms);
+    for (int i = 0; i < rooms_count; i++) {
+        cJSON *jroom = cJSON_GetArrayItem(jrooms, i);
+        if (!jroom) {
+            cJSON_Delete(jrooms);
+            TraceLog(LOG_WARNING, "Couldn't get room json object %d\n", i);
+            return false;
+        }
+
+        Room room = {0};
+
+        cJSON *jblocks = cJSON_GetObjectItemCaseSensitive(jroom, "blocks");
+        if (jblocks && cJSON_IsArray(jblocks)) {
+            int count = cJSON_GetArraySize(jblocks);
+            room.blocks = (Blocks){0};
+            room.blocks.items = (Block *)malloc(sizeof(Block)*count);
+            room.blocks.count = (size_t)count;
+            room.blocks.capacity = (size_t)count;
+            for (int i = 0; i < count; ++i) {
+                cJSON *jblock = cJSON_GetArrayItem(jblocks, i);
+                room.blocks.items[i] = parse_json_block(jblock);
+            }
+        }
+
+        cJSON *jdoors = cJSON_GetObjectItemCaseSensitive(jroom, "doors");
+        if (jdoors && cJSON_IsArray(jdoors)) {
+            int count = cJSON_GetArraySize(jdoors);
+            room.doors = (Doors){0};
+            room.doors.items = (Door *)malloc(sizeof(Door)*count);
+            room.doors.count = (size_t)count;
+            room.doors.capacity = (size_t)count;
+            for (int i = 0; i < count; ++i) {
+                cJSON *jdoor = cJSON_GetArrayItem(jdoors, i);
+                room.doors.items[i] = parse_json_door(jdoor);
+            }
+        }
+        da_push(&rooms, room);
+    }
+
+    cJSON_Delete(jrooms);
+    return true;
 }
 
 /// Collisions
@@ -232,7 +329,24 @@ void room_draw()
 {
     // Blocks
     for (size_t i = 0; i < CURRENT_ROOM->blocks.count; i++) { 
-        DrawRectangleRec(block_rect(CURRENT_ROOM->blocks.items[i]), BLACK);
+        const Block *block = &CURRENT_ROOM->blocks.items[i];
+        if (debug) {
+            DrawRectangleLinesEx(block_rect(*block), 1, BLACK);
+            //const float sizex = block->size.x/5;
+            //const float sizey = block->size.y/5;
+            const float sizex = 1.f;
+            const float sizey = 1.f;
+            Rectangle top   = {block->pos.x, block->pos.y, block->size.x, sizey};
+            Rectangle bot   = {block->pos.x, block->pos.y + block->size.y - sizey, block->size.x, sizey};
+            Rectangle left  = {block->pos.x, block->pos.y, sizex, block->size.y};
+            Rectangle right = {block->pos.x + block->size.x - sizex, block->pos.y, sizex, block->size.y};
+            DrawRectangleRec(top, GREEN);
+            DrawRectangleRec(bot, GREEN);
+            DrawRectangleRec(left, GREEN);
+            DrawRectangleRec(right, GREEN);
+        } else {
+            DrawRectangleRec(block_rect(*block), BLACK);
+        }
     }
 
     // Doors
@@ -269,7 +383,8 @@ void player_respawn(Vector2 checkpoint)
 
 void player_draw(void)
 {
-    DrawRectangleV(player.pos, player.size, DARKBLUE); 
+    if (debug) DrawRectangleLines(player.pos.x, player.pos.y, player.size.x, player.size.y, DARKBLUE); 
+    else DrawRectangleV(player.pos, player.size, DARKBLUE); 
 }
 
 static inline Rectangle player_rect(void) { return rect_from_v2(player.pos, player.size); }
@@ -291,37 +406,66 @@ Door *player_check_door_collision()
 #define COLLISION_LEFT  0x8
 #define COLLISION_ALL   0xF
 typedef uint8_t CollisionDirection;
-
-Block *player_check_block_collision(CollisionDirection *dir)
+void print_collision_direction(CollisionDirection dir, char c)
 {
-    const Room *room = CURRENT_ROOM;
-    for (size_t i = 0; i < room->blocks.count; i++) { 
-        Block *b = &room->blocks.items[i];
-        if (CheckCollisionRecs(block_rect(*b), player_rect())) {
-            if (dir) {
-                *dir = COLLISION_NONE;
-                if (player.pos.x + player.size.x > b->pos.x && player.pos.x < b->pos.x + b->size.x) {
-                    if (player.pos.y + player.size.y > b->pos.y && player.pos.y + player.size.y < b->pos.y + b->size.y/2) {
-                        *dir |= COLLISION_UP;
-                    }
-                    if (player.pos.y < b->pos.y + b->size.y && player.pos.y > b->pos.y + b->size.y/2) {
-                        *dir |= COLLISION_DOWN;
-                    }
-                }
-                if (player.pos.y + player.size.y > b->pos.y && player.pos.y < b->pos.y + b->size.y) {
-                    if (player.pos.x + player.size.x > b->pos.x && player.pos.x + player.size.x < b->pos.x + b->size.x/2) {
-                        *dir |= COLLISION_LEFT;
-                    }
-                    if (player.pos.x < b->pos.x + b->size.x && player.pos.x > b->pos.x + b->size.x/2) {
-                        *dir |= COLLISION_RIGHT;
-                    }
-                }
-            }
-            return b;
+    printf("Direction %c: ", c);
+    if (dir == COLLISION_NONE) {
+        printf("none\n");
+        return;
+    }
+    if (dir & COLLISION_UP)    printf("up ");
+    if (dir & COLLISION_RIGHT) printf("right ");
+    if (dir & COLLISION_DOWN)  printf("down ");
+    if (dir & COLLISION_LEFT)  printf("left ");
+    printf("\n");
+}
+
+typedef struct
+{
+    CollisionDirection *items;
+    size_t count;
+    size_t capacity;
+} CollisionDirections;
+typedef struct
+{
+    Block **items;
+    size_t count;
+    size_t capacity;
+} BlockPtrs;
+
+static BlockPtrs collided_blocks = {0};
+static CollisionDirections collided_blocks_directions = {0};
+bool player_check_blocks_collision(void)
+{
+    collided_blocks.count = 0;
+    collided_blocks_directions.count = 0;
+
+    Rectangle p_rect = player_rect();
+
+    for (size_t i = 0; i < CURRENT_ROOM->blocks.count; i++) { 
+        Block *block = &CURRENT_ROOM->blocks.items[i];
+        CollisionDirection dir = COLLISION_NONE;
+
+        //const float sizex = block->size.x/5;
+        //const float sizey = block->size.y/5;
+        const float sizex = 1.f;
+        const float sizey = 1.f;
+        Rectangle top   = {block->pos.x, block->pos.y, block->size.x, sizey};
+        Rectangle bot   = {block->pos.x, block->pos.y + block->size.y - sizey, block->size.x, sizey};
+        Rectangle left  = {block->pos.x, block->pos.y, sizex, block->size.y};
+        Rectangle right = {block->pos.x + block->size.x - sizex, block->pos.y, sizex, block->size.y};
+        
+        if (CheckCollisionRecs(p_rect, top))   dir |= COLLISION_UP;
+        if (CheckCollisionRecs(p_rect, bot))   dir |= COLLISION_DOWN;
+        if (CheckCollisionRecs(p_rect, left))  dir |= COLLISION_LEFT;
+        if (CheckCollisionRecs(p_rect, right)) dir |= COLLISION_RIGHT;
+
+        if (dir != COLLISION_NONE) {
+            da_push(&collided_blocks, block);
+            da_push(&collided_blocks_directions, dir);
         }
     }
-    if (dir) *dir = COLLISION_NONE;
-    return NULL;
+    return collided_blocks.count > 0;
 }
 
 void player_handle_controls()
@@ -338,8 +482,8 @@ void player_handle_controls()
     }
 
     // TODO: make it jump more if holding space bar
-    CollisionDirection dir;
-    if (IsKeyPressed(KEY_SPACE) && !player.jumping && player_check_block_collision(&dir) != NULL && (dir & COLLISION_UP)) {
+    if (IsKeyPressed(KEY_SPACE) && !player.jumping && player_check_blocks_collision()) {
+        // TODO: handle all the collided_blocks and their directions here
         player.jumping = true;
         player.vel.y = -JUMP_FORCE;
     }
@@ -351,21 +495,28 @@ void player_move_and_collide_y(float dt)
 
     if (player.pos.y > screen_height) {
         player_respawn((Vector2){100, 100});
+        player.vel.y = 0;
         return;
     }
 
-    CollisionDirection dir;
-    Block *block = player_check_block_collision(&dir);
+    bool collided = player_check_blocks_collision();
 
-    if (block && (dir & COLLISION_UP)) {
-        if (player.jumping) {
-            player.jumping = false;
-            player.vel.y = 0.f;
+    if (collided) {
+        for (size_t i = 0; i < collided_blocks.count; i++) {
+            Block *block = collided_blocks.items[i];
+            CollisionDirection dir = collided_blocks_directions.items[i];
+            //print_collision_direction(dir, 'y');
+            if (dir & COLLISION_UP) {
+                if (player.jumping) {
+                    player.jumping = false;
+                    player.vel.y = 0.f;
+                }
+                player.pos.y = block->pos.y - player.size.y + .1f; // TODO: non voglio dover sommare 0.1
+            } else if (dir & COLLISION_DOWN) {
+                player.pos.y = block->pos.y + block->size.y;
+                player.vel.y = 0.f;
+            }
         }
-        player.pos.y = block->pos.y - player.size.y + .1f; // TODO: non voglio dover sommare 0.1
-    } else if (block && (dir & COLLISION_DOWN)) { 
-        player.pos.y = block->pos.y + block->size.y;
-        player.vel.y = 0.f;
     } else player.vel.y += gravity * dt;
 }
 
@@ -375,14 +526,19 @@ void player_move_and_collide_x(float dt)
 
     player.pos.x += player.vel.x * player.direction * dt;
 
-    CollisionDirection dir;
-    Block *block = player_check_block_collision(&dir);
+    bool collided = player_check_blocks_collision();
 
-    if (block && !((dir & COLLISION_UP) || (dir &COLLISION_DOWN))) {
-        if (dir & COLLISION_LEFT) {
-            player.pos.x = block->pos.x - player.size.x;
-        } else if (dir & COLLISION_RIGHT) {
-            player.pos.x = block->pos.x + block->size.x;
+    if (collided) {
+        for (size_t i = 0; i < collided_blocks.count; i++) {
+            Block *block = collided_blocks.items[i];
+            CollisionDirection dir = collided_blocks_directions.items[i];
+            
+            //print_collision_direction(dir, 'x');
+            if (dir & COLLISION_LEFT && !(dir & COLLISION_UP)) {
+                player.pos.x = block->pos.x - player.size.x;
+            } else if (dir & COLLISION_RIGHT && !(dir & COLLISION_UP)) {
+                player.pos.x = block->pos.x + block->size.x;
+            }
         }
     }
 }
@@ -452,7 +608,7 @@ void check_unsaved_changes(void)
         while (c != 'Y' && c != 'N') {
             c = getchar();
         }
-        if (c == 'Y') save_rooms();
+        if (c == 'Y') save_rooms_to_json();
     }
 }
 
@@ -462,7 +618,10 @@ void game_init(void)
     screen_width = GetScreenWidth();
     screen_height = GetScreenHeight();
 
-    load_rooms();
+    if (!load_rooms_from_json()) {
+        TraceLog(LOG_FATAL, "Could not load rooms from %s", ROOMS_JSON_FILEPATH);
+        exit(1);
+    }
 
     camera.offset = (Vector2){ screen_width/2.f, screen_height/2.f };
     camera.rotation = 0.f;
@@ -500,7 +659,7 @@ void building_mode(void)
         } break;
         }
     } else if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) {
-        if (IsKeyPressed(KEY_S)) save_rooms();
+        if (IsKeyPressed(KEY_S)) save_rooms_to_json();
         else if (IsKeyPressed(KEY_P) && current_room+1 < rooms.count) current_room++;
         else if (IsKeyPressed(KEY_N) && current_room > 0) current_room--;
         else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
@@ -550,10 +709,12 @@ void building_mode(void)
             else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) selected_obj.dragging = false;
         } else if (selected_obj.resizing) {
             if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && IsKeyDown(KEY_LEFT_SHIFT))
+                // TODO: prevent the object from vanishing from reality by setting a minimum size and a position boundary
                 *selected_obj.size = Vector2Add(*selected_obj.size, GetMouseDelta());
             else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) selected_obj.dragging = false;
         }
         if (IsKeyDown(KEY_LEFT_SHIFT)) {
+            // TODO: prevent the object from vanishing from reality by setting a minimum size and a position boundary
             if (IsKeyPressed(KEY_UP))         selected_obj.size->y -= 1;
             else if (IsKeyPressed(KEY_RIGHT)) selected_obj.size->x += 1;
             else if (IsKeyPressed(KEY_DOWN))  selected_obj.size->y += 1;
@@ -564,20 +725,14 @@ void building_mode(void)
             else if (IsKeyPressed(KEY_DOWN))  selected_obj.pos->y += 1;
             else if (IsKeyPressed(KEY_LEFT))  selected_obj.pos->x -= 1;
         }
+
         if (CheckCollisionPointRec(mouse, selected_obj_rect())) {
-            // TODO: prevent the object from vanishing from reality by setting a minimum size and a position boundary
             if (IsKeyDown(KEY_LEFT_SHIFT)) {
                 SetMouseCursor(MOUSE_CURSOR_RESIZE_EW);
                 selected_obj.resizing = true;
-                //if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
-                //    //*selected_obj.size = Vector2Add(*selected_obj.size, GetMouseDelta());
-                //    *selected_obj.size = GetMousePositionRelativeToCamera();
             } else {
                 SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
                 selected_obj.dragging = true;
-                //if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
-                //    //*selected_obj.pos = Vector2Add(*selected_obj.pos, GetMouseDelta());
-                //    *selected_obj.pos = GetMousePositionRelativeToCamera();
             }
         } else {
             SetMouseCursor(MOUSE_CURSOR_DEFAULT);
@@ -585,13 +740,11 @@ void building_mode(void)
         if (IsKeyPressed(KEY_D)) { // TODO: maybe a way to undo it?
             switch (selected_obj.type) {
             case OBJ_BLOCK: {
-                Block b; UNUSED(b);
-                da_remove(&CURRENT_ROOM->blocks, selected_obj.index, b);
+                da_remove(&CURRENT_ROOM->blocks, selected_obj.index);
                 selected_obj.active = false;
             } break;
             case OBJ_DOOR: {
-                Door d; UNUSED(d);
-                da_remove(&CURRENT_ROOM->doors, selected_obj.index, d);
+                da_remove(&CURRENT_ROOM->doors, selected_obj.index);
                 selected_obj.active = false;
             } break;
             default: TraceLog(LOG_INFO, "Cannot delete objects of type `%s`", ObjectTypeToString(selected_obj.type));
@@ -604,6 +757,7 @@ void building_mode(void)
 /// Main
 int main(void)
 {
+
     InitWindow(800, 600, "MyGame");
     SetWindowState(/*FLAG_FULLSCREEN_MODE | */FLAG_WINDOW_RESIZABLE);
     SetTargetFPS(60);
@@ -614,11 +768,6 @@ int main(void)
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
 
-        if (IsKeyPressed(KEY_ESCAPE)) {
-            TraceLog(LOG_INFO, "E' stato bello");
-            if (modified) continue;
-        }
-            
         if (!adding_obj && IsKeyPressed(KEY_D)) debug = !debug;
         if (!(IsKeyDown(KEY_LEFT_CONTROL)) && IsKeyPressed(KEY_P)) game_pause = !game_pause;
         if (IsKeyPressed(KEY_B)) {
