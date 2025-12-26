@@ -86,8 +86,10 @@ typedef struct
     Vector2 vel;
     MoveDirection direction;
 
-    bool moving;
-    bool jumping;
+    bool is_moving;
+    bool is_grounded;
+
+    float coyote_timer;
 } Player;
 
 typedef enum
@@ -215,36 +217,45 @@ bool save_rooms_to_json(void)
     return ok;
 }
 
+Vector2 cJSON_GetVector2(cJSON *json, const char *name)
+{
+    Vector2 v = {0};
+    cJSON *jv = cJSON_GetObjectItemCaseSensitive(json, name);
+    v.x = (float)cJSON_GetObjectItemCaseSensitive(jv, "x")->valuedouble;
+    v.y = (float)cJSON_GetObjectItemCaseSensitive(jv, "y")->valuedouble;
+    return v;
+}
+
 Block parse_json_block(cJSON *jb) {
     Block b = {0};
-
-    cJSON *jbpos = cJSON_GetObjectItemCaseSensitive(jb, "pos");
-    b.pos.x  = (float)cJSON_GetObjectItemCaseSensitive(jbpos, "x")->valuedouble;
-    b.pos.y  = (float)cJSON_GetObjectItemCaseSensitive(jbpos, "y")->valuedouble;
-
-    cJSON *jbsize = cJSON_GetObjectItemCaseSensitive(jb, "size");
-    b.size.x = (float)cJSON_GetObjectItemCaseSensitive(jbsize, "x")->valuedouble;
-    b.size.y = (float)cJSON_GetObjectItemCaseSensitive(jbsize, "y")->valuedouble;
-
+    b.pos = cJSON_GetVector2(jb, "pos");
+    b.size = cJSON_GetVector2(jb, "size");
     return b;
 }
 
 Door parse_json_door(cJSON *jd) {
     Door d = {0};
-
-    cJSON *jdpos = cJSON_GetObjectItemCaseSensitive(jd, "pos");
-    d.pos.x  = (float)cJSON_GetObjectItemCaseSensitive(jdpos, "x")->valuedouble;
-    d.pos.y  = (float)cJSON_GetObjectItemCaseSensitive(jdpos, "y")->valuedouble;
-
-    cJSON *jdsize = cJSON_GetObjectItemCaseSensitive(jd, "size");
-    d.size.x = (float)cJSON_GetObjectItemCaseSensitive(jdsize, "x")->valuedouble;
-    d.size.y = (float)cJSON_GetObjectItemCaseSensitive(jdsize, "y")->valuedouble;
-
+    d.pos = cJSON_GetVector2(jd, "pos");
+    d.size = cJSON_GetVector2(jd, "size");
     d.takes_to = (size_t)cJSON_GetObjectItemCaseSensitive(jd, "takes_to")->valuedouble;
     d.spawn_left = (bool)cJSON_GetObjectItemCaseSensitive(jd, "spawn_left")->valuedouble;
-
     return d;
 }
+
+#define fill_da_from_json_array(jarray, da, Type, Types, item)  \
+    do {                                                        \
+        if ((jarray) && cJSON_IsArray(jarray)) {                \
+            int count = cJSON_GetArraySize(jarray);             \
+            (da) = (Types){0};                                  \
+            (da).items = (Type *)malloc(sizeof(Type)*count);    \
+            (da).count = (size_t)count;                         \
+            (da).capacity = (size_t)count;                      \
+            for (int j = 0; j < count; j++) {                   \
+                cJSON *jitem = cJSON_GetArrayItem((jarray), j); \
+                (da).items[j] = parse_json_ ## item(jitem);     \
+            }                                                   \
+        }                                                       \
+    } while (0)
 
 bool load_rooms_from_json(void) {
     Nob_String_Builder sb = {0};
@@ -272,29 +283,22 @@ bool load_rooms_from_json(void) {
 
         cJSON *jblocks = cJSON_GetObjectItemCaseSensitive(jroom, "blocks");
         if (jblocks && cJSON_IsArray(jblocks)) {
-            int count = cJSON_GetArraySize(jblocks);
-            room.blocks = (Blocks){0};
-            room.blocks.items = (Block *)malloc(sizeof(Block)*count);
-            room.blocks.count = (size_t)count;
-            room.blocks.capacity = (size_t)count;
-            for (int i = 0; i < count; ++i) {
-                cJSON *jblock = cJSON_GetArrayItem(jblocks, i);
-                room.blocks.items[i] = parse_json_block(jblock);
-            }
+            fill_da_from_json_array(jblocks, room.blocks, Block, Blocks, block);
+        } else {
+            cJSON_Delete(jrooms);
+            TraceLog(LOG_WARNING, "Couldn't parson blocks on room %d\n", i);
+            return false;
         }
 
         cJSON *jdoors = cJSON_GetObjectItemCaseSensitive(jroom, "doors");
         if (jdoors && cJSON_IsArray(jdoors)) {
-            int count = cJSON_GetArraySize(jdoors);
-            room.doors = (Doors){0};
-            room.doors.items = (Door *)malloc(sizeof(Door)*count);
-            room.doors.count = (size_t)count;
-            room.doors.capacity = (size_t)count;
-            for (int i = 0; i < count; ++i) {
-                cJSON *jdoor = cJSON_GetArrayItem(jdoors, i);
-                room.doors.items[i] = parse_json_door(jdoor);
-            }
+            fill_da_from_json_array(jdoors, room.doors, Door, Doors, door);
+        } else {
+            cJSON_Delete(jrooms);
+            TraceLog(LOG_WARNING, "Couldn't parson blocks on room %d\n", i);
+            return false;
         }
+
         da_push(&rooms, room);
     }
 
@@ -399,125 +403,65 @@ Door *player_check_door_collision()
     return NULL;
 }
 
-#define COLLISION_NONE  0
-#define COLLISION_UP    0x1
-#define COLLISION_RIGHT 0x2
-#define COLLISION_DOWN  0x4
-#define COLLISION_LEFT  0x8
-#define COLLISION_ALL   0xF
-typedef uint8_t CollisionDirection;
-void print_collision_direction(CollisionDirection dir, char c)
-{
-    printf("Direction %c: ", c);
-    if (dir == COLLISION_NONE) {
-        printf("none\n");
-        return;
-    }
-    if (dir & COLLISION_UP)    printf("up ");
-    if (dir & COLLISION_RIGHT) printf("right ");
-    if (dir & COLLISION_DOWN)  printf("down ");
-    if (dir & COLLISION_LEFT)  printf("left ");
-    printf("\n");
-}
-
-typedef struct
-{
-    CollisionDirection *items;
-    size_t count;
-    size_t capacity;
-} CollisionDirections;
-typedef struct
-{
-    Block **items;
-    size_t count;
-    size_t capacity;
-} BlockPtrs;
-
-static BlockPtrs collided_blocks = {0};
-static CollisionDirections collided_blocks_directions = {0};
-bool player_check_blocks_collision(void)
-{
-    collided_blocks.count = 0;
-    collided_blocks_directions.count = 0;
-
-    Rectangle p_rect = player_rect();
-
-    for (size_t i = 0; i < CURRENT_ROOM->blocks.count; i++) { 
-        Block *block = &CURRENT_ROOM->blocks.items[i];
-        CollisionDirection dir = COLLISION_NONE;
-
-        //const float sizex = block->size.x/5;
-        //const float sizey = block->size.y/5;
-        const float sizex = 1.f;
-        const float sizey = 1.f;
-        Rectangle top   = {block->pos.x, block->pos.y, block->size.x, sizey};
-        Rectangle bot   = {block->pos.x, block->pos.y + block->size.y - sizey, block->size.x, sizey};
-        Rectangle left  = {block->pos.x, block->pos.y, sizex, block->size.y};
-        Rectangle right = {block->pos.x + block->size.x - sizex, block->pos.y, sizex, block->size.y};
-        
-        if (CheckCollisionRecs(p_rect, top))   dir |= COLLISION_UP;
-        if (CheckCollisionRecs(p_rect, bot))   dir |= COLLISION_DOWN;
-        if (CheckCollisionRecs(p_rect, left))  dir |= COLLISION_LEFT;
-        if (CheckCollisionRecs(p_rect, right)) dir |= COLLISION_RIGHT;
-
-        if (dir != COLLISION_NONE) {
-            da_push(&collided_blocks, block);
-            da_push(&collided_blocks_directions, dir);
-        }
-    }
-    return collided_blocks.count > 0;
-}
-
 void player_handle_controls()
 {
-    player.moving = false;
+    player.is_moving = false;
     player.direction = DIR_FRONT;
 
     if (IsKeyDown(KEY_Z)) {
-        player.moving = true;
+        player.is_moving = true;
         player.direction = DIR_LEFT;
     } else if (IsKeyDown(KEY_C)) {
-        player.moving = true;
+        player.is_moving = true;
         player.direction = DIR_RIGHT;
     }
 
     // TODO: make it jump more if holding space bar
-    if (IsKeyPressed(KEY_SPACE) && !player.jumping && player_check_blocks_collision()) {
+    if (IsKeyPressed(KEY_SPACE) && (player.is_grounded || player.coyote_timer > 0)) {
         // TODO: handle all the collided_blocks and their directions here
-        player.jumping = true;
+        player.is_grounded = false;
+        player.coyote_timer = 0;
         player.vel.y = -JUMP_FORCE;
     }
 }
+
+#define COYOTE_TIMER 0.15f
 
 void player_move_and_collide_y(float dt)
 {
     player.pos.y += player.vel.y * dt;
 
-    if (player.pos.y > screen_height) {
-        player_respawn((Vector2){100, 100});
+    if (player.pos.y > screen_height + 500) {
+        player_respawn((Vector2){200, 400});
         player.vel.y = 0;
         return;
     }
 
-    bool collided = player_check_blocks_collision();
+    player.is_grounded = false;
 
-    if (collided) {
-        for (size_t i = 0; i < collided_blocks.count; i++) {
-            Block *block = collided_blocks.items[i];
-            CollisionDirection dir = collided_blocks_directions.items[i];
-            //print_collision_direction(dir, 'y');
-            if (dir & COLLISION_UP) {
-                if (player.jumping) {
-                    player.jumping = false;
-                    player.vel.y = 0.f;
-                }
-                player.pos.y = block->pos.y - player.size.y + .1f; // TODO: non voglio dover sommare 0.1
-            } else if (dir & COLLISION_DOWN) {
-                player.pos.y = block->pos.y + block->size.y;
-                player.vel.y = 0.f;
-            }
+    Rectangle p_rect = player_rect();
+    for (size_t i = 0; i < CURRENT_ROOM->blocks.count; i++) {
+        Block *block = &CURRENT_ROOM->blocks.items[i];
+        Rectangle b_rect = block_rect(*block);
+
+        if (!CheckCollisionRecs(p_rect, b_rect)) continue;
+
+        if (player.vel.y > 0) {
+            player.pos.y = block->pos.y - player.size.y;
+            player.vel.y = 0;
+            player.is_grounded = true;
+        } else if (player.vel.y < 0) {
+            player.pos.y = block->pos.y + block->size.y;
+            player.vel.y = 0;
         }
-    } else player.vel.y += gravity * dt;
+    }
+
+    if (player.is_grounded) {
+        player.coyote_timer = COYOTE_TIMER;
+    } else {
+        player.coyote_timer -= dt;
+        player.vel.y += gravity * dt;
+    }
 }
 
 void player_move_and_collide_x(float dt)
@@ -526,20 +470,17 @@ void player_move_and_collide_x(float dt)
 
     player.pos.x += player.vel.x * player.direction * dt;
 
-    bool collided = player_check_blocks_collision();
+    Rectangle p_rect = player_rect();
+    for (size_t i = 0; i < CURRENT_ROOM->blocks.count; i++) {
+        Block *block = &CURRENT_ROOM->blocks.items[i];
+        Rectangle b_rect = block_rect(*block);
 
-    if (collided) {
-        for (size_t i = 0; i < collided_blocks.count; i++) {
-            Block *block = collided_blocks.items[i];
-            CollisionDirection dir = collided_blocks_directions.items[i];
-            
-            //print_collision_direction(dir, 'x');
-            if (dir & COLLISION_LEFT && !(dir & COLLISION_UP)) {
-                player.pos.x = block->pos.x - player.size.x;
-            } else if (dir & COLLISION_RIGHT && !(dir & COLLISION_UP)) {
-                player.pos.x = block->pos.x + block->size.x;
-            }
-        }
+        if (!CheckCollisionRecs(p_rect, b_rect)) continue;
+
+        if (player.direction == DIR_RIGHT)
+            player.pos.x = block->pos.x - player.size.x;
+        else if (player.direction == DIR_LEFT)
+            player.pos.x = block->pos.x + block->size.x;
     }
 }
 
@@ -570,8 +511,8 @@ void player_check_move_through_door(void)
         player.pos = (Vector2){d_to->pos.x + d_to->size.x  + 10.f,  d_to->pos.y + d_to->size.y - player.size.y};
 
     player.direction = d_to->spawn_left ? DIR_LEFT : DIR_RIGHT;
-    player.moving = false;
-    player.jumping = false;
+    player.is_moving = false;
+    player.is_grounded = false;
     player.vel.y = 0.f;
     // TODO: timer for not receiving inputs
 }
