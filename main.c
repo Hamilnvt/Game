@@ -13,10 +13,10 @@
 /// Macros
 #define UNUSED(x) (void)(x)
 
-#define UNIMPLEMENTED(x)                      \
-    do {                                      \
-        printf("NOT IMPLEMENTED: %s\n", (x)); \
-        exit(1);                              \
+#define NOT_IMPLEMENTED(msg)                    \
+    do {                                        \
+        printf("NOT IMPLEMENTED: %s\n", (msg)); \
+        exit(1);                                \
     } while (0)
 
 #define JUMP_FORCE 500
@@ -24,6 +24,118 @@
 ///
 
 /// Data Structures
+
+//// TODO: refactoring
+
+typedef enum
+{
+    KIND_NIL,
+    KIND_PLAYER,
+    KIND_ROOM,
+    KIND_BLOCK,
+    KIND_DOOR,
+    __kinds_count
+} Kind;
+
+typedef size_t ThingIdx;
+#define NIL 0
+
+typedef enum
+{
+    DIR_LEFT = -1,
+    DIR_FRONT = 0,
+    DIR_RIGHT = 1
+} MoveDirection;
+
+typedef struct
+{
+    Kind kind;
+
+    Vector2 pos;
+    Vector2 size;
+
+    // Door
+    ThingIdx takes_to;
+    bool spawn_left;
+
+    // Player
+    MoveDirection direction;
+    bool is_moving;
+    bool is_grounded;
+    float coyote_timer;
+    float disabled_movements_timer;
+
+    // Room
+    ThingIdx first_block;
+    ThingIdx next_block;
+
+    ThingIdx first_door;
+    ThingIdx next_door;
+
+} Thing;
+
+typedef struct
+{
+    Thing *items;
+    size_t count;
+    size_t capacity;
+} Things;
+
+static Things things = {0};
+
+ThingIdx alloc_thing(void)
+{
+    if (things.count == 0) {
+        da_push(&things, (Thing){0});
+        return (ThingIdx) 1;
+    }
+
+    ThingIdx idx = NIL;
+    for (ThingIdx i = 1; i < things.count; i++) {
+        if (things.items[i].kind == KIND_NIL) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx == things.count) {
+        da_push(&things, (Thing){0});
+    }
+    return idx;
+}
+
+void remove_thing(ThingIdx i)
+{
+    if (i < things.count) {
+        memset(&things.items[i], 0, sizeof(things.items[i]));
+    }
+}
+
+Thing *get_thing(ThingIdx i)
+{
+    if (i < things.count) {
+        return &things.items[i];
+    } else {
+        return &things.items[0];
+    }
+}
+
+ThingIdx new_door(float posx, float posy, float sizex, float sizey, ThingIdx takes_to, bool spawn_left)
+{
+    ThingIdx i = alloc_thing();
+    if (i == NIL) return i;
+
+    things.items[i] = (Thing){
+        .kind       = KIND_DOOR,
+        .pos        = (Vector2){posx, posy},
+        .size       = (Vector2){sizex, sizey},
+        .takes_to   = takes_to,
+        .spawn_left = spawn_left
+    };
+    return i;
+}
+
+////
+
 typedef struct
 {
     Vector2 pos;
@@ -72,12 +184,8 @@ typedef struct {
     size_t capacity;
 } Rooms;
 
-typedef enum
-{
-    DIR_LEFT = -1,
-    DIR_FRONT = 0,
-    DIR_RIGHT = 1
-} MoveDirection;
+#define COYOTE_TIMER 0.15f
+#define DISABLED_MOVEMENTS_TIMER 0.5f
 
 typedef struct
 {
@@ -90,6 +198,8 @@ typedef struct
     bool is_grounded;
 
     float coyote_timer;
+
+    float disabled_movements_timer;
 } Player;
 
 typedef enum
@@ -158,6 +268,8 @@ static inline Room *get_room(size_t n) { return &rooms.items[n]; }
 
 bool save_rooms_to_json(void)
 {
+    TraceLog(LOG_INFO, "Saving rooms...");
+
     cJSON *root = cJSON_CreateArray();
     if (!root) return false;
 
@@ -214,6 +326,9 @@ bool save_rooms_to_json(void)
 
     bool ok = nob_write_entire_file(ROOMS_JSON_FILEPATH, printed, strlen(printed));
     free(printed);
+
+    TraceLog(LOG_INFO, "OK.");
+
     return ok;
 }
 
@@ -226,14 +341,16 @@ Vector2 cJSON_GetVector2(cJSON *json, const char *name)
     return v;
 }
 
-Block parse_json_block(cJSON *jb) {
+Block parse_json_block(cJSON *jb)
+{
     Block b = {0};
     b.pos = cJSON_GetVector2(jb, "pos");
     b.size = cJSON_GetVector2(jb, "size");
     return b;
 }
 
-Door parse_json_door(cJSON *jd) {
+Door parse_json_door(cJSON *jd)
+{
     Door d = {0};
     d.pos = cJSON_GetVector2(jd, "pos");
     d.size = cJSON_GetVector2(jd, "size");
@@ -257,7 +374,8 @@ Door parse_json_door(cJSON *jd) {
         }                                                       \
     } while (0)
 
-bool load_rooms_from_json(void) {
+bool load_rooms_from_json(void)
+{
     Nob_String_Builder sb = {0};
     if (!nob_read_entire_file(ROOMS_JSON_FILEPATH, &sb)) return false;
     nob_sb_append_null(&sb);
@@ -408,10 +526,10 @@ void player_handle_controls()
     player.is_moving = false;
     player.direction = DIR_FRONT;
 
-    if (IsKeyDown(KEY_Z)) {
+    if (IsKeyDown(KEY_A)) {
         player.is_moving = true;
         player.direction = DIR_LEFT;
-    } else if (IsKeyDown(KEY_C)) {
+    } else if (IsKeyDown(KEY_D)) {
         player.is_moving = true;
         player.direction = DIR_RIGHT;
     }
@@ -424,8 +542,6 @@ void player_handle_controls()
         player.vel.y = -JUMP_FORCE;
     }
 }
-
-#define COYOTE_TIMER 0.15f
 
 void player_move_and_collide_y(float dt)
 {
@@ -514,13 +630,19 @@ void player_check_move_through_door(void)
     player.is_moving = false;
     player.is_grounded = false;
     player.vel.y = 0.f;
-    // TODO: timer for not receiving inputs
+    player.disabled_movements_timer = DISABLED_MOVEMENTS_TIMER;
 }
 
 void player_update(float dt)
 {
-    if (game_state == PLAYING) player_handle_controls();
     player_move_and_collide_y(dt);
+
+    if (player.disabled_movements_timer > 0) {
+        player.disabled_movements_timer -= dt;
+        return;
+    }
+
+    if (game_state == PLAYING) player_handle_controls();
     player_move_and_collide_x(dt);
     player_check_move_through_door();
 }
@@ -531,10 +653,10 @@ void camera_update(void)
         float wheel = GetMouseWheelMove();
         if (fabsf(wheel) > 1e-6) camera.zoom = expf(logf(camera.zoom) + wheel*0.1f);
         if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) return;
-        if (IsKeyDown(KEY_Z)) camera.target.x -= 10;
-        if (IsKeyDown(KEY_C)) camera.target.x += 10;
-        if (IsKeyDown(KEY_S)) camera.target.y -= 10;
-        if (IsKeyDown(KEY_X)) camera.target.y += 10;
+        if (IsKeyDown(KEY_A)) camera.target.x -= 10;
+        if (IsKeyDown(KEY_D)) camera.target.x += 10;
+        if (IsKeyDown(KEY_W)) camera.target.y -= 10;
+        if (IsKeyDown(KEY_S)) camera.target.y += 10;
     } else {
         camera.target = Vector2Add(player.pos, Vector2Scale(player.size, .5f));
     }
@@ -573,18 +695,19 @@ void game_init(void)
 /// Modes
 void building_mode(void)
 {
-    if (IsKeyPressed(KEY_A)) {
+    if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_A)) {
         adding_obj = !adding_obj;
     } else if (adding_obj) {
         switch (GetKeyPressed())
         {
-        case KEY_G: {
+        case KEY_ONE: {
             Block b = {0};
             b.pos = GetMousePositionRelativeToCamera();
             b.size = (Vector2){50, 100};
             da_push(&CURRENT_ROOM->blocks, b); 
         } break;
-        case KEY_D: {
+        case KEY_TWO: {
+            // TODO: use new_door
             Door d = {0};
             d.pos = GetMousePositionRelativeToCamera();
             d.size = (Vector2){50, 100};
@@ -594,7 +717,7 @@ void building_mode(void)
             // - room connection
             // >> sarebbe carino che quando si seleziona un oggetto si possono modificare i suoi valori
         } break;
-        case KEY_R: {
+        case KEY_THREE: {
             current_room = rooms.count;
             da_push(&rooms, ((Room){0}));
         } break;
@@ -645,14 +768,18 @@ void building_mode(void)
         // TODO: ovviamente non funziona
         Vector2 mouse = GetMousePositionRelativeToCamera();
         if (selected_obj.dragging) {
-            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
-                *selected_obj.pos = Vector2Add(*selected_obj.pos, GetMouseDelta());
-            else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) selected_obj.dragging = false;
+            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                Vector2 delta = GetMouseDelta();
+                delta = Vector2Scale(delta, 1.0f / camera.zoom);
+                *selected_obj.pos = Vector2Add(*selected_obj.pos, delta);
+            } else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) selected_obj.dragging = false;
         } else if (selected_obj.resizing) {
-            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && IsKeyDown(KEY_LEFT_SHIFT))
+            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && IsKeyDown(KEY_LEFT_SHIFT)) {
                 // TODO: prevent the object from vanishing from reality by setting a minimum size and a position boundary
-                *selected_obj.size = Vector2Add(*selected_obj.size, GetMouseDelta());
-            else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) selected_obj.dragging = false;
+                Vector2 delta = GetMouseDelta();
+                delta = Vector2Scale(delta, 1.0f / camera.zoom);
+                *selected_obj.size = Vector2Add(*selected_obj.size, delta);
+            } else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) selected_obj.dragging = false;
         }
         if (IsKeyDown(KEY_LEFT_SHIFT)) {
             // TODO: prevent the object from vanishing from reality by setting a minimum size and a position boundary
@@ -698,7 +825,6 @@ void building_mode(void)
 /// Main
 int main(void)
 {
-
     InitWindow(800, 600, "MyGame");
     SetWindowState(/*FLAG_FULLSCREEN_MODE | */FLAG_WINDOW_RESIZABLE);
     SetTargetFPS(60);
@@ -706,15 +832,18 @@ int main(void)
     game_init();
     player_init();
 
-    while (!WindowShouldClose()) {
-        float dt = GetFrameTime();
+    float dt;
 
-        if (!adding_obj && IsKeyPressed(KEY_D)) debug = !debug;
+    while (!WindowShouldClose()) {
+        dt = GetFrameTime();
+
+        if (!adding_obj && IsKeyPressed(KEY_D) && IsKeyPressed(KEY_RIGHT_CONTROL)) debug = !debug;
         if (!(IsKeyDown(KEY_LEFT_CONTROL)) && IsKeyPressed(KEY_P)) game_pause = !game_pause;
         if (IsKeyPressed(KEY_B)) {
             if (game_state == BUILDING) {
                 camera.zoom = 1.f;
                 game_state = PLAYING;
+                selected_obj.active = false;
             } else if (game_state == PLAYING) game_state = BUILDING;
         }
 
@@ -765,9 +894,10 @@ int main(void)
             DrawText("BUILDING", screen_width-100, 50, 20, BLACK);
             if (adding_obj) {
                 size_t line = 1;
-                DrawText("room (r)", 10, screen_height - 25*line++, 20, BLACK);
-                DrawText("door (d)", 10, screen_height - 25*line++, 20, BLACK);
-                DrawText("block (g)", 10, screen_height - 25*line++, 20, BLACK);
+                size_t inv_line = 3;
+                DrawText(TextFormat("room  (%zu)", inv_line--), 10, screen_height - 25*line++, 20, BLACK);
+                DrawText(TextFormat("door  (%zu)", inv_line--), 10, screen_height - 25*line++, 20, BLACK);
+                DrawText(TextFormat("block (%zu)", inv_line--), 10, screen_height - 25*line++, 20, BLACK);
                 DrawText("ADD",        10, screen_height - 25*line++, 20, BLACK);
             }
         }
