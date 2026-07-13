@@ -37,6 +37,22 @@ typedef enum
     __kinds_count
 } Kind;
 
+char *thing_kind_to_string(Kind kind)
+{
+    switch(kind) {
+    case KIND_NIL:    return "Nil";
+    case KIND_PLAYER: return "Player";
+    case KIND_BLOCK:  return "Block";
+    case KIND_DOOR:   return "Door";
+    case KIND_ROOM:   return "Room";
+
+    case __kinds_count:
+    default:
+        TraceLog(LOG_FATAL, "Unreachable thing kind %d", kind);
+        exit(1);
+    }
+}
+
 typedef size_t ThingIdx;
 #define NIL 0
 
@@ -47,11 +63,20 @@ typedef enum
     DIR_RIGHT = 1
 } MoveDirection;
 
+typedef enum
+{
+    TRAIT_NONE       = 0,
+    TRAIT_DRAGGABLE  = (1 << 0),
+    TRAIT_RESIZEABLE = (1 << 1)
+} Traits;
+
 typedef struct
 {
     Kind kind;
+    Traits traits;
 
     Vector2 pos;
+    Vector2 vel;
     Vector2 size;
 
     // Door
@@ -76,6 +101,7 @@ typedef struct
 
 typedef struct
 {
+    // TODO: keep used list
     Thing *items;
     size_t count;
     size_t capacity;
@@ -119,19 +145,106 @@ Thing *get_thing(ThingIdx i)
     }
 }
 
+ThingIdx new_player(Vector2 pos, Vector2 size, Vector2 vel)
+{
+    ThingIdx i = alloc_thing();
+    if (i == NIL) {
+        TraceLog(LOG_ERROR, "Could not allocated %s", thing_kind_to_string(KIND_PLAYER));
+        return i;
+    }
+
+    things.items[i] = (Thing){
+        .kind       = KIND_PLAYER,
+        .traits     = TRAIT_DRAGGABLE,
+        .pos        = pos,
+        .vel        = vel,
+        .size       = size
+    };
+    return i;
+}
+
+ThingIdx new_block(float posx, float posy, float sizex, float sizey)
+{
+    ThingIdx i = alloc_thing();
+    if (i == NIL) {
+        TraceLog(LOG_ERROR, "Could not allocated %s", thing_kind_to_string(KIND_BLOCK));
+        return i;
+    }
+
+    things.items[i] = (Thing){
+        .kind       = KIND_BLOCK,
+        .traits     = TRAIT_DRAGGABLE | TRAIT_RESIZEABLE,
+        .pos        = (Vector2){posx, posy},
+        .size       = (Vector2){sizex, sizey},
+    };
+    return i;
+}
+
 ThingIdx new_door(float posx, float posy, float sizex, float sizey, ThingIdx takes_to, bool spawn_left)
 {
     ThingIdx i = alloc_thing();
-    if (i == NIL) return i;
+    if (i == NIL) {
+        TraceLog(LOG_ERROR, "Could not allocated %s", thing_kind_to_string(KIND_DOOR));
+        return i;
+    }
+
 
     things.items[i] = (Thing){
         .kind       = KIND_DOOR,
+        .traits     = TRAIT_DRAGGABLE | TRAIT_RESIZEABLE,
         .pos        = (Vector2){posx, posy},
         .size       = (Vector2){sizex, sizey},
         .takes_to   = takes_to,
         .spawn_left = spawn_left
     };
     return i;
+}
+
+ThingIdx new_room(void)
+{
+    ThingIdx i = alloc_thing();
+    if (i == NIL) {
+        TraceLog(LOG_ERROR, "Could not allocated %s", thing_kind_to_string(KIND_ROOM));
+        return i;
+    }
+
+    things.items[i] = (Thing){
+        .kind       = KIND_ROOM,
+    };
+
+    return i;
+}
+
+#define _intrusive_add(to_idx, item_idx, name) \
+    do {                                       \
+        Thing *to = get_thing(to_idx);         \
+        if (to->first_##name == NIL) {         \
+            to->first_##name = (item_idx);     \
+        } else {                               \
+            ThingIdx t_idx = to->first_##name; \
+            Thing *t = get_thing(t_idx);       \
+            while (t->next_##name != NIL) {    \
+                t_idx = t->next_##name;        \
+                t = get_thing(t_idx);          \
+            }                                  \
+            t->next_##name = (item_idx);       \
+        }                                      \
+    } while (0)
+
+void add_block_to_room(ThingIdx room_idx, ThingIdx block_idx)
+{
+    assert(get_thing(room_idx)->kind == KIND_ROOM);
+    assert(get_thing(block_idx)->kind == KIND_BLOCK);
+
+    _intrusive_add(room_idx, block_idx, block);
+}
+
+void add_door_to_room(ThingIdx room_idx, ThingIdx door_idx)
+{
+    assert(get_thing(room_idx)->kind == KIND_ROOM);
+    assert(get_thing(door_idx)->kind == KIND_DOOR);
+
+    _intrusive_add(room_idx, door_idx, door);
 }
 
 ////
@@ -245,6 +358,25 @@ typedef struct
 ///
 
 /// Global Variables
+typedef struct
+{
+    GameState state; // PLAYING
+    bool is_dirty;
+    bool debug;
+    bool is_paused;
+    SelectedObject selected_obj;
+    bool adding_obj;
+
+    size_t screen_width; // 1920
+    size_t screen_height; // 1280
+    Camera2D camera;
+    ThingIdx player_idx; // Alloc it then assign this
+    ThingIdx current_room;
+    float gravity; // 1200.f
+} Game;
+static Game game = {0}; // TODO: use this rather than free global variables
+                        // - add things in it
+
 static GameState game_state = PLAYING;
 static bool modified = false;
 static bool debug = false;
@@ -354,7 +486,7 @@ Door parse_json_door(cJSON *jd)
     Door d = {0};
     d.pos = cJSON_GetVector2(jd, "pos");
     d.size = cJSON_GetVector2(jd, "size");
-    d.takes_to = (size_t)cJSON_GetObjectItemCaseSensitive(jd, "takes_to")->valuedouble;
+    d.takes_to = (ThingIdx)cJSON_GetObjectItemCaseSensitive(jd, "takes_to")->valuedouble;
     d.spawn_left = (bool)cJSON_GetObjectItemCaseSensitive(jd, "spawn_left")->valuedouble;
     return d;
 }
@@ -388,8 +520,7 @@ bool load_rooms_from_json(void)
     }
 
     rooms = (Rooms){0};
-    int rooms_count = cJSON_GetArraySize(jrooms);
-    for (int i = 0; i < rooms_count; i++) {
+    for (int i = 0; i < cJSON_GetArraySize(jrooms); i++) {
         cJSON *jroom = cJSON_GetArrayItem(jrooms, i);
         if (!jroom) {
             cJSON_Delete(jrooms);
@@ -435,6 +566,7 @@ static inline Rectangle door_rect(Door d)       { return rect_from_v2(d.pos, d.s
 
 /// Room Functions
 
+// TODO: use enum, plese *eyeroll*
 void draw_arrow(int x, int y, int size, Color color, int dir)
 {
     DrawRectangle(x, y, size, size, color);     
@@ -491,6 +623,14 @@ static inline Vector2 GetMousePositionRelativeToCamera(void) { return GetScreenT
 
 void player_init(void)
 {
+    Vector2 pos  = {200.f, 400.f};
+    Vector2 size = {25.f, 50.f};
+    Vector2 vel  = {PLAYER_VELOCITY, 0.f};
+
+    game.player_idx = new_player(pos, size, vel);
+    assert(game.player_idx != NIL);
+    
+    // TODO: game.player
     player.pos  = (Vector2){200.f, 400.f};
     player.size = (Vector2){25.f, 50.f};
     player.vel  = (Vector2){PLAYER_VELOCITY, 0.f};
