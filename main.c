@@ -55,6 +55,8 @@ typedef size_t ThingIdx;
 #define NIL 0
 #define THING_NIL (&game.things.items[NIL])
 
+typedef uint64_t RoomID;
+
 typedef enum
 {
     DIR_LEFT = -1,
@@ -81,7 +83,7 @@ typedef struct
     Vector2 size;
 
     // Door
-    ThingIdx takes_to;
+    RoomID takes_to;
     bool spawn_left;
 
     // Player
@@ -142,25 +144,23 @@ typedef struct
     ThingIdx current_room;
     float gravity;
 } Game;
-static Game game = {0}; // TODO: use this rather than free global variables
+static Game game = {0};
+
+void reset_things(void)
+{
+    da_clear(&game.things);
+    da_push(&game.things, (Thing){0}); // Alloc THING_NIL
+}
 
 ThingIdx alloc_thing(void)
 {
-    if (game.things.count == 0) {
-        da_push(&game.things, (Thing){0});
-        return (ThingIdx) 1;
-    }
-
-    ThingIdx idx = NIL;
-    for (ThingIdx i = 1; i < game.things.count; i++) {
-        if (game.things.items[i].kind == KIND_NIL) {
-            idx = i;
-            break;
+    ThingIdx idx;
+    for (idx = 1; idx < game.things.count; idx++) {
+        if (game.things.items[idx].kind == KIND_NIL) {
+            return idx;
         }
     }
-    if (idx == game.things.count) {
-        da_push(&game.things, (Thing){0});
-    }
+    da_push(&game.things, (Thing){0});
     return idx;
 }
 
@@ -182,14 +182,23 @@ Thing *get_thing(ThingIdx i)
 
 static inline Thing *get_player(void) { return get_thing(game.player); }
 static inline Thing *get_room(ThingIdx idx) { return get_thing(idx); }
+static inline ThingIdx get_room_by_id(RoomID id)
+{
+    for (ThingIdx idx = 1; idx < game.things.count; idx++) {
+        Thing *room = get_thing(idx);
+        if (room->kind != KIND_ROOM) continue;
+        if (room->id == id) return idx;
+    }
+    return NIL;
+}
 #define CURRENT_ROOM (get_room(game.current_room))
 
 ThingIdx new_player(Vector2 pos, Vector2 size, Vector2 vel)
 {
     ThingIdx i = alloc_thing();
     if (i == NIL) {
-        TraceLog(LOG_ERROR, "Could not allocated %s", thing_kind_to_string(KIND_PLAYER));
-        return i;
+        TraceLog(LOG_ERROR, "Could not allocate %s", thing_kind_to_string(KIND_PLAYER));
+        abort();
     }
 
     game.things.items[i] = (Thing){
@@ -206,8 +215,8 @@ ThingIdx new_block(Vector2 pos, Vector2 size)
 {
     ThingIdx i = alloc_thing();
     if (i == NIL) {
-        TraceLog(LOG_ERROR, "Could not allocated %s", thing_kind_to_string(KIND_BLOCK));
-        return i;
+        TraceLog(LOG_ERROR, "Could not allocate %s", thing_kind_to_string(KIND_BLOCK));
+        abort();
     }
 
     game.things.items[i] = (Thing){
@@ -219,12 +228,12 @@ ThingIdx new_block(Vector2 pos, Vector2 size)
     return i;
 }
 
-ThingIdx new_door(Vector2 pos, Vector2 size, ThingIdx takes_to, bool spawn_left)
+ThingIdx new_door(Vector2 pos, Vector2 size, RoomID takes_to, bool spawn_left)
 {
     ThingIdx i = alloc_thing();
     if (i == NIL) {
-        TraceLog(LOG_ERROR, "Could not allocated %s", thing_kind_to_string(KIND_DOOR));
-        return i;
+        TraceLog(LOG_ERROR, "Could not allocate %s", thing_kind_to_string(KIND_DOOR));
+        abort();
     }
 
 
@@ -239,12 +248,12 @@ ThingIdx new_door(Vector2 pos, Vector2 size, ThingIdx takes_to, bool spawn_left)
     return i;
 }
 
-ThingIdx new_room(uint64_t id)
+ThingIdx new_room(RoomID id)
 {
     ThingIdx i = alloc_thing();
     if (i == NIL) {
-        TraceLog(LOG_ERROR, "Could not allocated %s", thing_kind_to_string(KIND_ROOM));
-        return i;
+        TraceLog(LOG_ERROR, "Could not allocate %s", thing_kind_to_string(KIND_ROOM));
+        abort();
     }
 
     game.things.items[i] = (Thing){
@@ -396,7 +405,7 @@ static inline ThingIdx new_door_from_json(cJSON *jd)
     return new_door(
         cJSON_GetVector2(jd, "pos"),
         cJSON_GetVector2(jd, "size"),
-        (ThingIdx)cJSON_GetObjectItemCaseSensitive(jd, "takes_to")->valuedouble,
+        (RoomID)cJSON_GetObjectItemCaseSensitive(jd, "takes_to")->valuedouble,
         (bool)cJSON_GetObjectItemCaseSensitive(jd, "spawn_left")->valuedouble
     );
 }
@@ -406,8 +415,8 @@ static inline ThingIdx new_door_from_json(cJSON *jd)
         if ((jarray) && cJSON_IsArray(jarray)) {                   \
             for (int j = 0; j < cJSON_GetArraySize(jarray); j++) { \
                 cJSON *jitem = cJSON_GetArrayItem((jarray), j);    \
-                ThingIdx idx = new_##name##_from_json(jitem);      \
-                add_##name##_to_room(idx, list_idx);               \
+                ThingIdx item_idx = new_##name##_from_json(jitem); \
+                add_##name##_to_room(list_idx, item_idx);          \
             }                                                      \
         }                                                          \
     } while (0)
@@ -425,7 +434,7 @@ bool load_rooms_from_json(void)
         return false;
     }
 
-    da_clear(&game.things);
+    reset_things();
 
     for (int i = 0; i < cJSON_GetArraySize(jrooms); i++) {
         cJSON *jroom = cJSON_GetArrayItem(jrooms, i);
@@ -437,14 +446,16 @@ bool load_rooms_from_json(void)
 
         ThingIdx room_idx = new_room(i);
         assert(room_idx != NIL);
+        if (game.current_room == NIL) {
+            game.current_room = room_idx; // TODO: will this be always true?
+        }
 
-        // TODO
         cJSON *jblocks = cJSON_GetObjectItemCaseSensitive(jroom, "blocks");
         if (jblocks && cJSON_IsArray(jblocks)) {
             fill_list_from_json_array(jblocks, room_idx, block);
         } else {
             cJSON_Delete(jrooms);
-            TraceLog(LOG_WARNING, "Couldn't parson blocks on room %d\n", i);
+            TraceLog(LOG_WARNING, "Couldn't parse blocks json in room %d\n", i);
             return false;
         }
 
@@ -453,7 +464,7 @@ bool load_rooms_from_json(void)
             fill_list_from_json_array(jdoors, room_idx, door);
         } else {
             cJSON_Delete(jrooms);
-            TraceLog(LOG_WARNING, "Couldn't parson blocks on room %d\n", i);
+            TraceLog(LOG_WARNING, "Couldn't parse doors json in room %d\n", i);
             return false;
         }
     }
@@ -525,7 +536,7 @@ void room_draw()
         sprintf(buffer, "%zu", i);
         DrawText(buffer, d->pos.x + 10, d->pos.y + 10, 20, DARKBROWN);
         memset(buffer, 0, sizeof(buffer));
-        sprintf(buffer, "> %zu", d->takes_to);
+        sprintf(buffer, "> %lu", d->takes_to);
         DrawText(buffer, d->pos.x + 10, d->pos.y + 30, 20, DARKBROWN);
 
         i++;
@@ -622,7 +633,10 @@ void player_move_and_collide_y(float dt)
         Thing *block = get_thing(block_idx);
         Rectangle b_rect = rect(block);
 
-        if (!CheckCollisionRecs(p_rect, b_rect)) continue;
+        if (!CheckCollisionRecs(p_rect, b_rect)) {
+            block_idx = block->next_block;
+            continue;
+        }
 
         if (player->vel.y > 0) {
             player->pos.y = block->pos.y - player->size.y;
@@ -658,7 +672,10 @@ void player_move_and_collide_x(float dt)
         Thing *block = get_thing(block_idx);
         Rectangle b_rect = rect(block);
 
-        if (!CheckCollisionRecs(p_rect, b_rect)) continue;
+        if (!CheckCollisionRecs(p_rect, b_rect)) {
+            block_idx = block->next_block;
+            continue;
+        }
 
         if (player->direction == DIR_RIGHT)
             player->pos.x = block->pos.x - player->size.x;
@@ -675,14 +692,16 @@ void player_check_move_through_door(void)
 
     Thing *d_from = player_check_door_collision();
     if (d_from == THING_NIL) return;
-    ThingIdx new_room_idx = d_from->takes_to;
+
+    RoomID new_room_id = d_from->takes_to;
+    ThingIdx new_room_idx = get_room_by_id(new_room_id);
     Thing *new_room = get_thing(new_room_idx);
 
     ThingIdx d_to_idx = new_room->first_door;
     Thing *d_to;
     while (d_to_idx != NIL) {
         d_to = get_thing(d_to_idx);
-        if (d_to->takes_to == game.current_room) {
+        if (d_to->takes_to == CURRENT_ROOM->id) {
             break;
         }
 
@@ -758,6 +777,8 @@ void game_init(void)
 {
     game.screen_width = GetScreenWidth();
     game.screen_height = GetScreenHeight();
+
+    reset_things();
 
     if (!load_rooms_from_json()) {
         TraceLog(LOG_FATAL, "Could not load rooms from %s", ROOMS_JSON_FILEPATH);
@@ -907,7 +928,7 @@ void game_init(void)
 /// Main
 int main(void)
 {
-    InitWindow(800, 600, "MyGame");
+    InitWindow(800, 600, "Placeholder");
     SetWindowState(/*FLAG_FULLSCREEN_MODE | */FLAG_WINDOW_RESIZABLE);
     SetTargetFPS(60);
 
@@ -916,6 +937,7 @@ int main(void)
     float dt;
 
     while (!WindowShouldClose()) {
+
         dt = GetFrameTime();
 
         if (!game.adding_thing && IsKeyPressed(KEY_D) && IsKeyPressed(KEY_RIGHT_CONTROL)) game.debug = !game.debug;
