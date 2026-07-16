@@ -56,6 +56,7 @@ typedef size_t ThingIdx;
 #define THING_NIL (&game.things.items[NIL])
 
 typedef uint64_t RoomID;
+#define NO_ID 0
 
 typedef enum
 {
@@ -66,9 +67,11 @@ typedef enum
 
 typedef enum
 {
-    TRAIT_NONE       = 0,
-    TRAIT_DRAGGABLE  = (1 << 0),
-    TRAIT_RESIZEABLE = (1 << 1)
+    TRAIT_NONE           = 0,
+    TRAIT_NON_SELECTABLE = (1 << 0),
+    TRAIT_DRAGGABLE      = (1 << 1),
+    TRAIT_RESIZEABLE     = (1 << 2),
+    TRAIT_NON_DELETABLE  = (1 << 3)
 } Traits;
 
 typedef struct
@@ -203,7 +206,7 @@ ThingIdx new_player(Vector2 pos, Vector2 size, Vector2 vel)
 
     game.things.items[i] = (Thing){
         .kind       = KIND_PLAYER,
-        .traits     = TRAIT_DRAGGABLE,
+        .traits     = TRAIT_DRAGGABLE | TRAIT_NON_DELETABLE,
         .pos        = pos,
         .vel        = vel,
         .size       = size
@@ -257,8 +260,9 @@ ThingIdx new_room(RoomID id)
     }
 
     game.things.items[i] = (Thing){
-        .kind = KIND_ROOM,
-        .id   = id
+        .kind   = KIND_ROOM,
+        .traits = TRAIT_NON_SELECTABLE,
+        .id     = id
     };
 
     return i;
@@ -344,7 +348,7 @@ bool save_rooms_to_json(void)
         }
 
         cJSON *doors = cJSON_CreateArray();
-        cJSON_AddItemToObject(jroom, "blocks", doors);
+        cJSON_AddItemToObject(jroom, "doors", doors);
         ThingIdx door_idx = room->first_door;
         Thing *door;
         while (door_idx != NIL) {
@@ -421,6 +425,9 @@ static inline ThingIdx new_door_from_json(cJSON *jd)
         }                                                          \
     } while (0)
 
+static RoomID room_id_counter = 1;
+#define rooms_count (room_id_counter - 1)
+
 bool load_rooms_from_json(void)
 {
     Nob_String_Builder sb = {0};
@@ -444,8 +451,7 @@ bool load_rooms_from_json(void)
             return false;
         }
 
-        ThingIdx room_idx = new_room(i);
-        assert(room_idx != NIL);
+        ThingIdx room_idx = new_room(room_id_counter++);
         if (game.current_room == NIL) {
             game.current_room = room_idx; // TODO: will this be always true?
         }
@@ -480,7 +486,6 @@ static inline Rectangle rect_from_v2(Vector2 pos, Vector2 size)
 }
 static inline Rectangle rect(const Thing *t) { return rect_from_v2(t->pos, t->size); }
 static inline Rectangle player_rect(void) { return rect(get_player()); }
-//static inline Rectangle selected_things_rect(void) { return rect_from_v2(*game.selected_things.pos, *game.selected_things.size); }
 
 /// Room Functions
 
@@ -555,7 +560,6 @@ void player_init(void)
     Vector2 vel  = {PLAYER_VELOCITY, 0.f};
 
     game.player = new_player(pos, size, vel);
-    assert(game.player != NIL);
     Thing *player = get_player();
     
     player->pos  = (Vector2){200.f, 400.f};
@@ -796,134 +800,128 @@ void game_init(void)
 ///
 
 /// Modes
-//void building_mode(void)
-//{
-//    if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_A)) {
-//        game.adding_thing = !game.adding_thing;
-//    } else if (game.adding_thing) {
-//        switch (GetKeyPressed())
-//        {
-//        case KEY_ONE: {
-//            Block b = {0};
-//            b.pos = GetMousePositionRelativeToCamera();
-//            b.size = (Vector2){50, 100};
-//            da_push(&CURRENT_ROOM->blocks, b); 
-//        } break;
-//        case KEY_TWO: {
-//            // TODO: use new_door
-//            Door d = {0};
-//            d.pos = GetMousePositionRelativeToCamera();
-//            d.size = (Vector2){50, 100};
-//            da_push(&CURRENT_ROOM->doors, d); 
-//            // TODO: add mechanism to change:
-//            // - spawning direction
-//            // - room connection
-//            // >> sarebbe carino che quando si seleziona un oggetto si possono modificare i suoi valori
-//        } break;
-//        case KEY_THREE: {
-//            current_room = rooms.count;
-//            da_push(&rooms, ((Room){0}));
-//        } break;
-//        }
-//    } else if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) {
-//        if (IsKeyPressed(KEY_S)) save_rooms_to_json();
-//        else if (IsKeyPressed(KEY_P) && current_room+1 < rooms.count) current_room++;
-//        else if (IsKeyPressed(KEY_N) && current_room > 0) current_room--;
-//        else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-//            game.selected_things.active = false;
-//            Vector2 mouse = GetMousePositionRelativeToCamera();
-//            if (CheckCollisionPointRec(mouse, player_rect())) {
-//                game.selected_things.active = true;
-//                game.selected_things.type = OBJ_PLAYER;
-//                game.selected_things.pos = &player.pos;
-//                game.selected_things.size = &player.size;
-//            } else {
-//
-//                for (size_t i = 0; i < CURRENT_ROOM->blocks.count; i++) {
-//                    Block *b = &CURRENT_ROOM->blocks.items[i];
-//                    if (CheckCollisionPointRec(mouse, rect(b))) {
-//                        game.selected_things.active = true;
-//                        game.selected_things.type = OBJ_BLOCK;
-//                        game.selected_things.pos = &b->pos;
-//                        game.selected_things.size = &b->size;
-//                        game.selected_things.index = i;
-//                        break;
-//                    }
-//                }
-//
-//                if (!game.selected_things.active) {
-//                    for (size_t i = 0; i < CURRENT_ROOM->doors.count; i++) {
-//                        Door *d = &CURRENT_ROOM->doors.items[i];
-//                        if (CheckCollisionPointRec(mouse, rect(d))) {
-//                            game.selected_things.active = true;
-//                            game.selected_things.type = OBJ_DOOR;
-//                            game.selected_things.pos = &d->pos;
-//                            game.selected_things.size = &d->size;
-//                            game.selected_things.index = i;
-//                            break;
-//                        }
-//                    }
-//                }
-//
-//            }
-//        }
-//    } else if (game.selected_things.active) {
-//        // TODO: ovviamente non funziona
-//        Vector2 mouse = GetMousePositionRelativeToCamera();
-//        if (game.selected_things.dragging) {
-//            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-//                Vector2 delta = GetMouseDelta();
-//                delta = Vector2Scale(delta, 1.0f / game.camera.zoom);
-//                *game.selected_things.pos = Vector2Add(*game.selected_things.pos, delta);
-//            } else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) game.selected_things.dragging = false;
-//        } else if (game.selected_things.resizing) {
-//            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && IsKeyDown(KEY_LEFT_SHIFT)) {
-//                // TODO: prevent the object from vanishing from reality by setting a minimum size and a position boundary
-//                Vector2 delta = GetMouseDelta();
-//                delta = Vector2Scale(delta, 1.0f / game.camera.zoom);
-//                *game.selected_things.size = Vector2Add(*game.selected_things.size, delta);
-//            } else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) game.selected_things.dragging = false;
-//        }
-//        if (IsKeyDown(KEY_LEFT_SHIFT)) {
-//            // TODO: prevent the object from vanishing from reality by setting a minimum size and a position boundary
-//            if (IsKeyPressed(KEY_UP))         game.selected_things.size->y -= 1;
-//            else if (IsKeyPressed(KEY_RIGHT)) game.selected_things.size->x += 1;
-//            else if (IsKeyPressed(KEY_DOWN))  game.selected_things.size->y += 1;
-//            else if (IsKeyPressed(KEY_LEFT))  game.selected_things.size->x -= 1;
-//        } else {
-//            if (IsKeyPressed(KEY_UP))    game.selected_things.pos->y -= 1;
-//            else if (IsKeyPressed(KEY_RIGHT)) game.selected_things.pos->x += 1;
-//            else if (IsKeyPressed(KEY_DOWN))  game.selected_things.pos->y += 1;
-//            else if (IsKeyPressed(KEY_LEFT))  game.selected_things.pos->x -= 1;
-//        }
-//
-//        if (CheckCollisionPointRec(mouse, game.selected_things_rect())) {
-//            if (IsKeyDown(KEY_LEFT_SHIFT)) {
-//                SetMouseCursor(MOUSE_CURSOR_RESIZE_EW);
-//                game.selected_things.resizing = true;
-//            } else {
-//                SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
-//                game.selected_things.dragging = true;
-//            }
-//        } else {
-//            SetMouseCursor(MOUSE_CURSOR_DEFAULT);
-//        }
-//        if (IsKeyPressed(KEY_D)) { // TODO: maybe a way to undo it?
-//            switch (game.selected_things.type) {
-//            case OBJ_BLOCK: {
-//                da_remove(&CURRENT_ROOM->blocks, game.selected_things.index);
-//                game.selected_things.active = false;
-//            } break;
-//            case OBJ_DOOR: {
-//                da_remove(&CURRENT_ROOM->doors, game.selected_things.index);
-//                game.selected_things.active = false;
-//            } break;
-//            default: TraceLog(LOG_INFO, "Cannot delete things of kind `%s`", ObjectTypeToString(game.selected_things.type));
-//            }
-//        }
-//    }
-//}
-///
+void building_mode(void)
+{
+    if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_A)) {
+        game.adding_thing = !game.adding_thing;
+    } else if (game.adding_thing) {
+        switch (GetKeyPressed())
+        {
+        case KEY_ONE: {
+            const Vector2 default_size = {50, 100};
+            ThingIdx block_idx = new_block(
+                GetMousePositionRelativeToCamera(),
+                default_size
+            );
+            add_block_to_room(game.current_room, block_idx);
+        } break;
+        case KEY_TWO: {
+            const Vector2 default_size = {50, 100};
+            const RoomID default_takes_to = NO_ID;
+            const bool default_spawn_left = false;
+            ThingIdx door_idx = new_door(
+                GetMousePositionRelativeToCamera(),
+                default_size,
+                default_takes_to,
+                default_spawn_left
+            );
+            add_block_to_room(game.current_room, door_idx);
+
+            // TODO: add mechanism to change:
+            // - spawning direction
+            // - room connection
+            // >> sarebbe carino che quando si seleziona un oggetto si possono modificare i suoi valori
+        } break;
+        case KEY_THREE: {
+            ThingIdx room_idx = new_room(room_id_counter++);
+            game.current_room = room_idx;
+        } break;
+        }
+    } else if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) {
+        if (IsKeyPressed(KEY_S)) save_rooms_to_json();
+        else if (IsKeyPressed(KEY_P) && CURRENT_ROOM->id+1 < rooms_count) {
+            game.current_room = get_room_by_id(CURRENT_ROOM->id + 1);
+        } else if (IsKeyPressed(KEY_N) && CURRENT_ROOM->id > 1) {
+            game.current_room = get_room_by_id(CURRENT_ROOM->id - 1);
+        } else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            Vector2 mouse = GetMousePositionRelativeToCamera();
+            for (ThingIdx i = 1; i < game.things.count; i++) {
+                Thing *t = get_thing(i);
+                if (t->kind == KIND_NIL) continue;
+                if (t->traits & TRAIT_NON_SELECTABLE) continue;
+                if (CheckCollisionPointRec(mouse, rect(t))) {
+                    da_push(&game.selected_things, i);
+                }
+            }
+        } else if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+            da_clear(&game.selected_things);
+        }
+    } else if (game.selected_things.count > 0) {
+        Vector2 mouse = GetMousePositionRelativeToCamera();
+        bool mouse_cursor_changed = false;
+        for (size_t i = 0; i < game.selected_things.count; i++) {
+            ThingIdx idx = game.selected_things.items[i];
+            Thing *t = get_thing(idx);
+
+            if (CheckCollisionPointRec(mouse, rect(t))) {
+                if (IsKeyDown(KEY_LEFT_SHIFT)) {
+                    SetMouseCursor(MOUSE_CURSOR_RESIZE_EW);
+                    mouse_cursor_changed = true;
+                    game.selected_things.resizing = true;
+                } else {
+                    SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
+                    mouse_cursor_changed = true;
+                    game.selected_things.dragging = true;
+                }
+            } else if (!mouse_cursor_changed) {
+                SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+            }
+
+            if (game.selected_things.dragging) {
+                if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                    Vector2 delta = Vector2Scale(GetMouseDelta(), 1.0f / game.camera.zoom);
+                    t->pos = Vector2Add(t->pos, delta);
+                } else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) game.selected_things.dragging = false;
+            } else if (game.selected_things.resizing) {
+                if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && IsKeyDown(KEY_LEFT_SHIFT)) {
+                    // TODO: prevent the object from vanishing from reality by setting a minimum size and a position boundary
+                    Vector2 delta = Vector2Scale(GetMouseDelta(), 1.0f / game.camera.zoom);
+                    t->size = Vector2Add(t->size, delta);
+                } else if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) game.selected_things.resizing = false;
+            } else if (IsKeyDown(KEY_LEFT_SHIFT)) {
+                // TODO: prevent the object from vanishing from reality by setting a minimum size and a position boundary
+                if (IsKeyPressed(KEY_UP))         t->size.y -= 1;
+                else if (IsKeyPressed(KEY_RIGHT)) t->size.x += 1;
+                else if (IsKeyPressed(KEY_DOWN))  t->size.y += 1;
+                else if (IsKeyPressed(KEY_LEFT))  t->size.x -= 1;
+            } else {
+                if (IsKeyPressed(KEY_UP))         t->pos.y -= 1;
+                else if (IsKeyPressed(KEY_RIGHT)) t->pos.x += 1;
+                else if (IsKeyPressed(KEY_DOWN))  t->pos.y += 1;
+                else if (IsKeyPressed(KEY_LEFT))  t->pos.x -= 1;
+            }
+        }
+
+        if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_D)) { // TODO: maybe a way to undo it?
+            TraceLog(LOG_WARNING, "Implement thing deletion");
+            //bool can_delete = true;
+            //for (size_t i = 0; i < game.selected_things.count; i++) {
+            //    ThingIdx idx = game.selected_things.items[i];
+            //    Thing *t = get_thing(idx);
+            //    if (t->trait & TRAIT_NON_DELETABLE) {
+            //        can_delete = false;
+            //        break;
+            //    }
+            //}
+            //if (can_delete) {
+            //    int i = game.selected_things.count - 1;
+            //    while (i > 0) {
+            //        
+            //    }
+            //}
+        }
+    }
+}
 
 /// Main
 int main(void)
@@ -944,16 +942,14 @@ int main(void)
         if (!(IsKeyDown(KEY_LEFT_CONTROL)) && IsKeyPressed(KEY_P)) game.is_paused = !game.is_paused;
         if (IsKeyPressed(KEY_B)) {
             if (game.state == BUILDING) {
-                // TODO
-                //game.camera.zoom = 1.f;
-                //game.state = PLAYING;
-                //game.selected_things.active = false;
+                game.camera.zoom = 1.f;
+                game.state = PLAYING;
+                da_clear(&game.selected_things);
             } else if (game.state == PLAYING) game.state = BUILDING;
         }
 
         if (game.state == BUILDING) {
-            // TODO
-            //building_mode();
+            building_mode();
         }
 
         if (!game.is_paused) player_update(dt);
@@ -968,11 +964,15 @@ int main(void)
         player_draw();
 
         if (game.state == BUILDING) {
-            // TODO
-            //if (game.selected_things.active) {
-            //    DrawRectangleLinesEx((Rectangle){game.selected_things.pos->x, game.selected_things.pos->y, game.selected_things.size->x, game.selected_things.size->y}, 3, BLACK);
-            //    DrawRectangleLinesEx((Rectangle){game.selected_things.pos->x+1, game.selected_things.pos->y+1, game.selected_things.size->x-2, game.selected_things.size->y-2}, 1, RED);
-            //}
+            if (game.selected_things.count > 0) {
+                for (size_t i = 0; i < game.selected_things.count; i++) {
+                    ThingIdx idx = game.selected_things.items[i];
+                    Thing *t = get_thing(idx);
+
+                    DrawRectangleLinesEx(rect(t), 3, BLACK);
+                    DrawRectangleLinesEx((Rectangle){t->pos.x+1, t->pos.y+1, t->size.x-2, t->size.y-2}, 1, RED);
+                }
+            }
         }
 
         EndMode2D();
