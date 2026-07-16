@@ -19,7 +19,8 @@
         exit(1);                                \
     } while (0)
 
-#define JUMP_FORCE 500
+#define JUMP_FORCE 600
+#define GROUND_YOURSELF_FORCE 20
 #define PLAYER_VELOCITY 300
 ///
 
@@ -300,7 +301,7 @@ void add_door_to_room(ThingIdx room_idx, ThingIdx door_idx)
     _intrusive_add(room_idx, door_idx, door);
 }
 
-#define COYOTE_TIMER 0.15f
+#define COYOTE_TIMER 0.10f
 #define DISABLED_MOVEMENTS_TIMER 0.5f
 
 ///
@@ -608,9 +609,11 @@ void player_handle_controls()
         player->direction = DIR_RIGHT;
     }
 
-    // TODO: make it jump more if holding space bar
+    if (IsKeyDown(KEY_S) && !player->is_grounded) {
+        player->vel.y += GROUND_YOURSELF_FORCE;
+    }
+
     if (IsKeyPressed(KEY_SPACE) && (player->is_grounded || player->coyote_timer > 0)) {
-        // TODO: handle all the collided_blocks and their directions here
         player->is_grounded = false;
         player->coyote_timer = 0;
         player->vel.y = -JUMP_FORCE;
