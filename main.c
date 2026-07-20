@@ -1,3 +1,7 @@
+// TODO:
+// terminal
+// > set_checkpoint (to player position, or to mouse?)
+
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,6 +82,14 @@ typedef enum
     TRAIT_NON_DELETABLE  = (1 << 3)
 } Traits;
 
+typedef enum
+{
+    BLOCK_NONE      = 0,
+    BLOCK_SOLID     = (1 << 0),
+    BLOCK_INVISIBLE = (1 << 1),
+    BLOCK_DANGEROUS = (1 << 2)
+} BlockTraits;
+
 typedef struct
 {
     uint64_t id;
@@ -88,6 +100,9 @@ typedef struct
     Vector2 pos;
     Vector2 vel;
     Vector2 size;
+
+    // Block
+    BlockTraits block_traits;
 
     // Door
     RoomID takes_to;
@@ -141,6 +156,7 @@ typedef struct
     size_t screen_height;
     Camera2D camera;
     ThingIdx player;
+    Vector2 checkpoint; // TODO
     ThingIdx current_room;
     float gravity;
 
@@ -199,7 +215,6 @@ Thing *get_active_thing(void)
     }
 }
 
-static inline Thing *get_player(void) { return get_thing(game.player); }
 static inline Thing *get_room(ThingIdx idx) { return get_thing(idx); }
 static inline ThingIdx get_room_by_id(RoomID id)
 {
@@ -210,6 +225,7 @@ static inline ThingIdx get_room_by_id(RoomID id)
     }
     return NIL;
 }
+#define PLAYER (get_thing(game.player))
 #define CURRENT_ROOM (get_room(game.current_room))
 
 ThingIdx new_player(Vector2 pos, Vector2 size, Vector2 vel)
@@ -230,7 +246,7 @@ ThingIdx new_player(Vector2 pos, Vector2 size, Vector2 vel)
     return i;
 }
 
-ThingIdx new_block(Vector2 pos, Vector2 size)
+ThingIdx new_block(Vector2 pos, Vector2 size, BlockTraits block_traits)
 {
     ThingIdx i = alloc_thing();
     if (i == NIL) {
@@ -239,10 +255,11 @@ ThingIdx new_block(Vector2 pos, Vector2 size)
     }
 
     game.things.items[i] = (Thing){
-        .kind       = KIND_BLOCK,
-        .traits     = TRAIT_DRAGGABLE | TRAIT_RESIZEABLE,
-        .pos        = pos,
-        .size       = size,
+        .kind         = KIND_BLOCK,
+        .traits       = TRAIT_DRAGGABLE | TRAIT_RESIZEABLE,
+        .pos          = pos,
+        .size         = size,
+        .block_traits = block_traits
     };
     return i;
 }
@@ -361,6 +378,8 @@ bool save_rooms_to_json(void)
             cJSON_AddNumberToObject(jbsize, "y", block->size.y);
             cJSON_AddItemToObject(jb, "size", jbsize);
 
+            cJSON_AddNumberToObject(jb, "traits", block->block_traits);
+
             cJSON_AddItemToArray(blocks, jb);
 
             block_idx = block->next_block;
@@ -417,9 +436,12 @@ Vector2 cJSON_GetVector2(cJSON *json, const char *name)
 
 static inline ThingIdx new_block_from_json(cJSON *jb)
 {
+    cJSON *jtraits = cJSON_GetObjectItemCaseSensitive(jb, "traits");
+    BlockTraits traits = jtraits ? jtraits->valuedouble : BLOCK_NONE;
     return new_block(
         cJSON_GetVector2(jb, "pos"),
-        cJSON_GetVector2(jb, "size")
+        cJSON_GetVector2(jb, "size"),
+        traits
     );
 }
 
@@ -501,7 +523,7 @@ static inline Rectangle rect_from_v2(Vector2 pos, Vector2 size)
     return (Rectangle){.x=pos.x, .y=pos.y, .width=size.x, .height=size.y};
 }
 static inline Rectangle rect(const Thing *t) { return rect_from_v2(t->pos, t->size); }
-static inline Rectangle player_rect(void) { return rect(get_player()); }
+static inline Rectangle player_rect(void) { return rect(PLAYER); }
 
 /// Room Functions
 
@@ -524,8 +546,13 @@ void room_draw()
     ThingIdx block_idx = CURRENT_ROOM->first_block;
     while (block_idx != NIL) {
         const Thing *block = get_thing(block_idx);
+        if (block->block_traits & BLOCK_INVISIBLE) {
+            block_idx = block->next_block;
+            continue;
+        }
+        Color color = block->block_traits & BLOCK_DANGEROUS ? DARKBROWN : BLACK;
         if (game.debug) {
-            DrawRectangleLinesEx(rect(block), 1, BLACK);
+            DrawRectangleLinesEx(rect(block), 1, color);
             //const float sizex = block->size.x/5;
             //const float sizey = block->size.y/5;
             const float sizex = 1.f;
@@ -539,7 +566,7 @@ void room_draw()
             DrawRectangleRec(left, GREEN);
             DrawRectangleRec(right, GREEN);
         } else {
-            DrawRectangleRec(rect(block), BLACK);
+            DrawRectangleRec(rect(block), color);
         }
 
         block_idx = block->next_block;
@@ -565,6 +592,16 @@ void room_draw()
 /// Player Functions
 static inline Vector2 GetMousePositionRelativeToCamera(void) { return GetScreenToWorld2D(GetMousePosition(), game.camera); }
 
+// TODO: save room id as well, then save/load from savefile
+void set_checkpoint(Vector2 checkpoint)
+{
+    game.checkpoint = checkpoint;
+}
+void player_respawn(void)
+{
+    PLAYER->pos = game.checkpoint;
+}
+
 void player_init(void)
 {
     Vector2 pos  = {200.f, 400.f};
@@ -572,25 +609,20 @@ void player_init(void)
     Vector2 vel  = {PLAYER_VELOCITY, 0.f};
 
     game.player = new_player(pos, size, vel);
-    Thing *player = get_player();
     
-    player->pos  = (Vector2){200.f, 400.f};
-    player->size = (Vector2){25.f, 50.f};
-    player->vel  = (Vector2){PLAYER_VELOCITY, 0.f};
+    PLAYER->pos  = (Vector2){200.f, 400.f};
+    PLAYER->size = (Vector2){25.f, 50.f};
+    PLAYER->vel  = (Vector2){PLAYER_VELOCITY, 0.f};
 
-    game.camera.target = Vector2Add(player->pos, Vector2Scale(player->size, .5f));
-}
+    game.camera.target = Vector2Add(PLAYER->pos, Vector2Scale(PLAYER->size, .5f));
 
-void player_respawn(Vector2 checkpoint)
-{
-    get_player()->pos = checkpoint;
+    set_checkpoint((Vector2){200, 300});
 }
 
 void player_draw(void)
 {
-    Thing *player = get_player();
-    if (game.debug) DrawRectangleLines(player->pos.x, player->pos.y, player->size.x, player->size.y, DARKBLUE); 
-    else DrawRectangleV(player->pos, player->size, DARKBLUE); 
+    if (game.debug) DrawRectangleLines(PLAYER->pos.x, PLAYER->pos.y, PLAYER->size.x, PLAYER->size.y, DARKBLUE); 
+    else DrawRectangleV(PLAYER->pos, PLAYER->size, DARKBLUE); 
 }
 
 Thing *player_check_door_collision()
@@ -607,48 +639,56 @@ Thing *player_check_door_collision()
 
 void player_handle_controls()
 {
-    Thing *player = get_player();
-
-    player->is_moving = false;
-    player->direction = DIR_FRONT;
+    PLAYER->is_moving = false;
+    PLAYER->direction = DIR_FRONT;
 
     if (IsKeyDown(KEY_A)) {
-        player->is_moving = true;
-        player->direction = DIR_LEFT;
+        PLAYER->is_moving = true;
+        PLAYER->direction = DIR_LEFT;
     } else if (IsKeyDown(KEY_D)) {
-        player->is_moving = true;
-        player->direction = DIR_RIGHT;
+        PLAYER->is_moving = true;
+        PLAYER->direction = DIR_RIGHT;
     }
 
-    if (IsKeyDown(KEY_S) && !player->is_grounded) {
-        player->vel.y += GROUND_YOURSELF_FORCE;
+    if (IsKeyDown(KEY_S) && !PLAYER->is_grounded) {
+        PLAYER->vel.y += GROUND_YOURSELF_FORCE;
     }
 
-    if (IsKeyPressed(KEY_SPACE) && (player->is_grounded || player->coyote_timer > 0)) {
-        player->is_grounded = false;
-        player->coyote_timer = 0;
-        player->vel.y = -JUMP_FORCE;
+    if (IsKeyPressed(KEY_SPACE) && (PLAYER->is_grounded || PLAYER->coyote_timer > 0)) {
+        PLAYER->is_grounded = false;
+        PLAYER->coyote_timer = 0;
+        PLAYER->vel.y = -JUMP_FORCE;
     }
+}
+
+void player_die(void)
+{
+    player_respawn();
+    PLAYER->vel.y = 0;
+    PLAYER->disabled_movements_timer = DISABLED_MOVEMENTS_TIMER;
 }
 
 void player_move_and_collide_y(float dt)
 {
-    Thing *player = get_player();
+    PLAYER->pos.y += PLAYER->vel.y * dt;
 
-    player->pos.y += player->vel.y * dt;
-
-    if (player->pos.y > game.screen_height + 500) {
-        player_respawn((Vector2){200, 400});
-        player->vel.y = 0;
+    if (PLAYER->pos.y > game.screen_height + 500) {
+        player_die();
         return;
     }
 
-    player->is_grounded = false;
+    PLAYER->is_grounded = false;
 
     Rectangle p_rect = player_rect();
     ThingIdx block_idx = CURRENT_ROOM->first_block;
     while (block_idx != NIL) {
         Thing *block = get_thing(block_idx);
+
+        if (!(block->block_traits & BLOCK_SOLID)) {
+            block_idx = block->next_block;
+            continue;
+        }
+
         Rectangle b_rect = rect(block);
 
         if (!CheckCollisionRecs(p_rect, b_rect)) {
@@ -656,38 +696,47 @@ void player_move_and_collide_y(float dt)
             continue;
         }
 
-        if (player->vel.y > 0) {
-            player->pos.y = block->pos.y - player->size.y;
-            player->vel.y = 0;
-            player->is_grounded = true;
-        } else if (player->vel.y < 0) {
-            player->pos.y = block->pos.y + block->size.y;
-            player->vel.y = 0;
+        if (block->block_traits & BLOCK_DANGEROUS) {
+            player_die();
+            return;
+        }
+
+        if (PLAYER->vel.y > 0) {
+            PLAYER->pos.y = block->pos.y - PLAYER->size.y;
+            PLAYER->vel.y = 0;
+            PLAYER->is_grounded = true;
+        } else if (PLAYER->vel.y < 0) {
+            PLAYER->pos.y = block->pos.y + block->size.y;
+            PLAYER->vel.y = 0;
         }
 
         block_idx = block->next_block;
     }
 
-    if (player->is_grounded) {
-        player->coyote_timer = COYOTE_TIMER;
+    if (PLAYER->is_grounded) {
+        PLAYER->coyote_timer = COYOTE_TIMER;
     } else {
-        player->coyote_timer -= dt;
-        player->vel.y += game.gravity * dt;
+        PLAYER->coyote_timer -= dt;
+        PLAYER->vel.y += game.gravity * dt;
     }
 }
 
 void player_move_and_collide_x(float dt)
 {
-    Thing *player = get_player();
+    if (PLAYER->direction == DIR_FRONT) return;
 
-    if (player->direction == DIR_FRONT) return;
-
-    player->pos.x += player->vel.x * player->direction * dt;
+    PLAYER->pos.x += PLAYER->vel.x * PLAYER->direction * dt;
 
     Rectangle p_rect = player_rect();
     ThingIdx block_idx = CURRENT_ROOM->first_block;
     while (block_idx != NIL) {
         Thing *block = get_thing(block_idx);
+
+        if (!(block->block_traits & BLOCK_SOLID)) {
+            block_idx = block->next_block;
+            continue;
+        }
+
         Rectangle b_rect = rect(block);
 
         if (!CheckCollisionRecs(p_rect, b_rect)) {
@@ -695,10 +744,15 @@ void player_move_and_collide_x(float dt)
             continue;
         }
 
-        if (player->direction == DIR_RIGHT)
-            player->pos.x = block->pos.x - player->size.x;
-        else if (player->direction == DIR_LEFT)
-            player->pos.x = block->pos.x + block->size.x;
+        if (block->block_traits & BLOCK_DANGEROUS) {
+            player_die();
+            return;
+        }
+
+        if (PLAYER->direction == DIR_RIGHT)
+            PLAYER->pos.x = block->pos.x - PLAYER->size.x;
+        else if (PLAYER->direction == DIR_LEFT)
+            PLAYER->pos.x = block->pos.x + block->size.x;
 
         block_idx = block->next_block;
     }
@@ -706,8 +760,6 @@ void player_move_and_collide_x(float dt)
 
 void player_check_move_through_door(void)
 {
-    Thing *player = get_player();
-
     Thing *d_from = player_check_door_collision();
     if (d_from == THING_NIL) return;
 
@@ -734,25 +786,23 @@ void player_check_move_through_door(void)
     game.current_room = new_room_idx;
 
     if (d_to->spawn_left)
-        player->pos = (Vector2){d_to->pos.x - player->size.x - 10.f,  d_to->pos.y + d_to->size.y - player->size.y};
+        PLAYER->pos = (Vector2){d_to->pos.x - PLAYER->size.x - 10.f,  d_to->pos.y + d_to->size.y - PLAYER->size.y};
     else
-        player->pos = (Vector2){d_to->pos.x + d_to->size.x  + 10.f,  d_to->pos.y + d_to->size.y - player->size.y};
+        PLAYER->pos = (Vector2){d_to->pos.x + d_to->size.x  + 10.f,  d_to->pos.y + d_to->size.y - PLAYER->size.y};
 
-    player->direction = d_to->spawn_left ? DIR_LEFT : DIR_RIGHT;
-    player->is_moving = false;
-    player->is_grounded = false;
-    player->vel.y = 0.f;
-    player->disabled_movements_timer = DISABLED_MOVEMENTS_TIMER;
+    PLAYER->direction = d_to->spawn_left ? DIR_LEFT : DIR_RIGHT;
+    PLAYER->is_moving = false;
+    PLAYER->is_grounded = false;
+    PLAYER->vel.y = 0.f;
+    PLAYER->disabled_movements_timer = DISABLED_MOVEMENTS_TIMER;
 }
 
 void player_update(float dt)
 {
-    Thing *player = get_player();
-
     player_move_and_collide_y(dt);
 
-    if (player->disabled_movements_timer > 0) {
-        player->disabled_movements_timer -= dt;
+    if (PLAYER->disabled_movements_timer > 0) {
+        PLAYER->disabled_movements_timer -= dt;
         return;
     }
 
@@ -772,8 +822,7 @@ void camera_update(void)
         if (IsKeyDown(KEY_W)) game.camera.target.y -= 10;
         if (IsKeyDown(KEY_S)) game.camera.target.y += 10;
     } else {
-        Thing *player = get_player();
-        game.camera.target = Vector2Add(player->pos, Vector2Scale(player->size, .5f));
+        game.camera.target = Vector2Add(PLAYER->pos, Vector2Scale(PLAYER->size, .5f));
     }
 }
 ///
@@ -1105,8 +1154,38 @@ void execute_terminal_command(void)
         } break;
         case KIND_BLOCK:
         {
-            TraceLog(LOG_WARNING, "TODO: set properties of \"%s\"", thing_kind_to_string(t->kind));
-            return;
+            if (sv_eq_cstr(property, "traits")) {
+                bool add_trait;
+                char sign = value.data[0];
+                if (sign == '+') {
+                    add_trait = true;
+                } else if (sign == '-') {
+                    add_trait = false;
+                } else {
+                    TraceLog(LOG_WARNING, "Invalid sign for flag value '%c' for property "SV_FMT, sign,
+                            SV_ARG(property));
+                    return;
+                }
+                sv_chop_first(&value);
+
+                BlockTraits trait = BLOCK_NONE;
+                if (sv_eq_cstr(value, "solid")) {
+                    trait = BLOCK_SOLID;
+                } else if (sv_eq_cstr(value, "invisible")) {
+                    trait = BLOCK_INVISIBLE;
+                } else if (sv_eq_cstr(value, "dangerous")) {
+                    trait = BLOCK_DANGEROUS;
+                } else {
+                    TraceLog(LOG_WARNING, "Unknown block trait \""SV_FMT"\"", SV_ARG(value));
+                    return;
+                }
+                if (add_trait) t->block_traits |=  trait;
+                else           t->block_traits &= ~trait;
+            } else {
+                TraceLog(LOG_WARNING, "Unknown property \""SV_FMT"\" for %s", SV_ARG(property),
+                        thing_kind_to_string(t->kind));
+                return;
+            }
         } break;
         case KIND_DOOR:
         {
@@ -1129,7 +1208,8 @@ void execute_terminal_command(void)
                     return;
                 }
             } else {
-                TraceLog(LOG_WARNING, "Unknown property \""SV_FMT"\" for %s", SV_ARG(property), thing_kind_to_string(t->kind));
+                TraceLog(LOG_WARNING, "Unknown property \""SV_FMT"\" for %s", SV_ARG(property),
+                        thing_kind_to_string(t->kind));
                 return;
             }
         } break;
@@ -1155,7 +1235,8 @@ void execute_terminal_command(void)
             const Vector2 default_size = {50, 100};
             ThingIdx block_idx = new_block(
                 GetMousePositionRelativeToCamera(),
-                default_size
+                default_size,
+                BLOCK_SOLID
             );
             add_block_to_room(game.current_room, block_idx);
         } else if (sv_eq_cstr(kind, "door")) {
