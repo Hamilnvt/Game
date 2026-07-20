@@ -21,8 +21,10 @@ int main(int argc, char **argv)
     cmd_append(&cmd, "-lraylib", "-lm");
     if (!cmd_run(&cmd)) return 1;
 
-    cmd_append(&cmd, BUILD_FOLDER"platform");
-    if (!cmd_run(&cmd)) return 1;
+    if (argc > 1 && strncmp(argv[1], "run", 3) == 0) {
+        cmd_append(&cmd, BUILD_FOLDER"platform");
+        if (!cmd_run(&cmd)) return 1;
+    }
 
     return 0;
 }

@@ -7,6 +7,9 @@
 #include "thirdparties/cJSON/cJSON.h"
 #include "dynamic_arrays.h"
 
+#define MY_STRINGS_IMPLEMENTATION
+#include "my_strings.h"
+
 #define NOB_IMPLEMENTATION
 #include "nob.h"
 
@@ -38,7 +41,7 @@ typedef enum
 
 char *thing_kind_to_string(Kind kind)
 {
-    switch(kind) {
+    switch (kind) {
     case KIND_NIL:    return "Nil";
     case KIND_PLAYER: return "Player";
     case KIND_BLOCK:  return "Block";
@@ -108,47 +111,50 @@ typedef struct
 
 typedef struct
 {
-    // TODO: keep used list
-    Thing *items;
-    size_t count;
-    size_t capacity;
-} Things;
+    enum {
+        PLAYING,
+        BUILDING
+    } state;
 
-typedef enum
-{
-    PLAYING,
-    BUILDING
-} GameState;
-
-typedef struct
-{
-    ThingIdx *items;
-    size_t count;
-    size_t capacity;
-
-    bool dragging;
-    bool resizing;
-} SelectedThings;
-
-typedef struct
-{
-    GameState state; // PLAYING
     bool is_dirty;
     bool debug;
     bool is_paused;
 
-    SelectedThings selected_things;
-    bool adding_thing;
+    struct {
+        ThingIdx *items;
+        size_t count;
+        size_t capacity;
 
-    Things things;
+        size_t active_index;
+        bool dragging;
+        bool resizing;
+    } selected_things;
+
+    struct {
+        // TODO: keep used list
+        Thing *items;
+        size_t count;
+        size_t capacity;
+    } things;
+
     size_t screen_width;
     size_t screen_height;
     Camera2D camera;
     ThingIdx player;
     ThingIdx current_room;
     float gravity;
+
+    struct {
+        bool is_shown;
+        size_t cursor;
+        size_t line_index;
+        String *items;
+        size_t count;
+        size_t capacity;
+    } terminal;
 } Game;
-static Game game = {0};
+
+static Game game;
 
 void reset_things(void)
 {
@@ -181,6 +187,15 @@ Thing *get_thing(ThingIdx i)
         return &game.things.items[i];
     } else {
         return THING_NIL;
+    }
+}
+
+Thing *get_active_thing(void)
+{
+    if (game.selected_things.count == 0) {
+        return THING_NIL;
+    } else {
+        return get_thing(game.selected_things.items[game.selected_things.active_index]);
     }
 }
 
@@ -252,7 +267,10 @@ ThingIdx new_door(Vector2 pos, Vector2 size, RoomID takes_to, bool spawn_left)
     return i;
 }
 
-ThingIdx new_room(RoomID id)
+static RoomID room_id_counter = 1;
+#define rooms_count (room_id_counter - 1)
+
+ThingIdx new_room(void)
 {
     ThingIdx i = alloc_thing();
     if (i == NIL) {
@@ -263,7 +281,7 @@ ThingIdx new_room(RoomID id)
     game.things.items[i] = (Thing){
         .kind   = KIND_ROOM,
         .traits = TRAIT_NON_SELECTABLE,
-        .id     = id
+        .id     = room_id_counter++
     };
 
     return i;
@@ -307,7 +325,7 @@ void add_door_to_room(ThingIdx room_idx, ThingIdx door_idx)
 ///
 
 /// Rooms
-static size_t current_room = 0;
+
 #define ROOMS_JSON_FILEPATH "./rooms.json"
 
 bool save_rooms_to_json(void)
@@ -426,9 +444,6 @@ static inline ThingIdx new_door_from_json(cJSON *jd)
         }                                                          \
     } while (0)
 
-static RoomID room_id_counter = 1;
-#define rooms_count (room_id_counter - 1)
-
 bool load_rooms_from_json(void)
 {
     Nob_String_Builder sb = {0};
@@ -452,7 +467,7 @@ bool load_rooms_from_json(void)
             return false;
         }
 
-        ThingIdx room_idx = new_room(room_id_counter++);
+        ThingIdx room_idx = new_room();
         if (game.current_room == NIL) {
             game.current_room = room_idx; // TODO: will this be always true?
         }
@@ -538,12 +553,8 @@ void room_draw()
 
         DrawRectangleRec(rect(d), RED);
         draw_arrow(d->pos.x + (d->spawn_left ? -20 : d->size.x + 10), d->pos.y+d->size.y/2-5, 10, RED, d->spawn_left ? 3 : 1);
-        char buffer[32] = {0};
-        sprintf(buffer, "%zu", i);
-        DrawText(buffer, d->pos.x + 10, d->pos.y + 10, 20, DARKBROWN);
-        memset(buffer, 0, sizeof(buffer));
-        sprintf(buffer, "> %lu", d->takes_to);
-        DrawText(buffer, d->pos.x + 10, d->pos.y + 30, 20, DARKBROWN);
+        DrawText(TextFormat("%zu", i), d->pos.x + 10, d->pos.y + 10, 20, DARKBROWN);
+        DrawText(TextFormat("> %lu", d->takes_to), d->pos.x + 10, d->pos.y + 30, 20, DARKBROWN);
 
         i++;
         door_idx = d->next_door;
@@ -716,7 +727,7 @@ void player_check_move_through_door(void)
     }
 
     if (d_to_idx == NIL) {
-        TraceLog(LOG_WARNING, "No door connection from %zu to %zu", CURRENT_ROOM->id, new_room->id);
+        TraceLog(LOG_WARNING, "No door connection from room %lu to room %lu", CURRENT_ROOM->id, new_room->id);
         return;
     }
 
@@ -745,7 +756,7 @@ void player_update(float dt)
         return;
     }
 
-    if (game.state == PLAYING) player_handle_controls();
+    if (game.state == PLAYING && !game.terminal.is_shown) player_handle_controls();
     player_move_and_collide_x(dt);
     player_check_move_through_door();
 }
@@ -771,10 +782,10 @@ void check_unsaved_changes(void)
 {
     if (game.is_dirty) {
         printf("\nWARNING: You have unsaved changes, wanna save? [Y/N]\n");
-        int c = getchar();
-        while (c != 'Y' && c != 'N') {
+        int c;
+        do {
             c = getchar();
-        }
+        } while (c != 'Y' && c != 'N');
         if (c == 'Y') save_rooms_to_json();
     }
 }
@@ -799,50 +810,17 @@ void game_init(void)
     game.gravity = 1200.f;
 
     player_init();
+
+    da_push(&game.terminal, (String){0}); // First empty terminal
 }
 ///
 
 /// Modes
 void building_mode(void)
 {
-    if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_A)) {
-        game.adding_thing = !game.adding_thing;
-    } else if (game.adding_thing) {
-        switch (GetKeyPressed())
-        {
-        case KEY_ONE: {
-            const Vector2 default_size = {50, 100};
-            ThingIdx block_idx = new_block(
-                GetMousePositionRelativeToCamera(),
-                default_size
-            );
-            add_block_to_room(game.current_room, block_idx);
-        } break;
-        case KEY_TWO: {
-            const Vector2 default_size = {50, 100};
-            const RoomID default_takes_to = NO_ID;
-            const bool default_spawn_left = false;
-            ThingIdx door_idx = new_door(
-                GetMousePositionRelativeToCamera(),
-                default_size,
-                default_takes_to,
-                default_spawn_left
-            );
-            add_block_to_room(game.current_room, door_idx);
-
-            // TODO: add mechanism to change:
-            // - spawning direction
-            // - room connection
-            // >> sarebbe carino che quando si seleziona un oggetto si possono modificare i suoi valori
-        } break;
-        case KEY_THREE: {
-            ThingIdx room_idx = new_room(room_id_counter++);
-            game.current_room = room_idx;
-        } break;
-        }
-    } else if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) {
+    if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) {
         if (IsKeyPressed(KEY_S)) save_rooms_to_json();
-        else if (IsKeyPressed(KEY_P) && CURRENT_ROOM->id+1 < rooms_count) {
+        else if (IsKeyPressed(KEY_P) && CURRENT_ROOM->id+1 <= rooms_count) {
             game.current_room = get_room_by_id(CURRENT_ROOM->id + 1);
         } else if (IsKeyPressed(KEY_N) && CURRENT_ROOM->id > 1) {
             game.current_room = get_room_by_id(CURRENT_ROOM->id - 1);
@@ -854,6 +832,7 @@ void building_mode(void)
                 if (t->traits & TRAIT_NON_SELECTABLE) continue;
                 if (CheckCollisionPointRec(mouse, rect(t))) {
                     da_push(&game.selected_things, i);
+                    game.selected_things.active_index = game.selected_things.count-1;
                 }
             }
         } else if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
@@ -926,7 +905,280 @@ void building_mode(void)
     }
 }
 
-/// Main
+void update(float dt)
+{
+    if (!game.is_paused) player_update(dt);
+    camera_update();
+}
+
+void draw(void)
+{
+    room_draw();
+    player_draw();
+
+    if (game.state == BUILDING) {
+        if (game.selected_things.count > 0) {
+            for (size_t i = 0; i < game.selected_things.count; i++) {
+                ThingIdx idx = game.selected_things.items[i];
+                Thing *t = get_thing(idx);
+
+                DrawRectangleLinesEx(rect(t), 3, BLACK);
+
+                Color color = i == game.selected_things.active_index ? RED : ORANGE;
+                DrawRectangleLinesEx((Rectangle){t->pos.x+1, t->pos.y+1, t->size.x-2, t->size.y-2}, 1, color);
+            }
+        }
+    }
+}
+
+void ui(void)
+{
+    if (game.is_paused) DrawText("PAUSE", game.screen_width-100, 10, 20, BLACK);
+    if (game.debug) {
+        DrawText("DEBUG", game.screen_width-100, 30, 20, BLACK);
+
+        size_t line = 1;
+        DrawText(TextFormat("FPS: %d", GetFPS()), 25, 25*line++, 20, BLACK);
+
+        Vector2 mouse = GetMousePosition();
+        DrawText(TextFormat("mouse abs: (%.2f, %.2f)", mouse.x, mouse.y), 25, 25*line++, 20, BLACK);
+
+        mouse = GetMousePositionRelativeToCamera();
+        DrawText(TextFormat("mouse rel: (%.2f, %.2f)", mouse.x, mouse.y), 25, 25*line++, 20, BLACK);
+    }
+    if (game.state == BUILDING) {
+        DrawText("BUILDING", game.screen_width-100, 50, 20, BLACK);
+
+        if (game.selected_things.count > 0) {
+            DrawRectangle(0, 0, 300, 600, BLACK);
+            Thing *t = get_active_thing();
+            float y_spacing = 2;
+            float divider = 10*y_spacing;
+            float start_x = y_spacing;
+            float line_y = 2;
+            float font_kind = 30;
+            float font_cathegory = 25;
+            float font_property = 20;
+
+            DrawText(thing_kind_to_string(t->kind), start_x, line_y, font_kind, WHITE);
+            line_y += font_kind + y_spacing + divider;
+            {
+                DrawText("  Position", start_x, line_y, font_cathegory, WHITE);
+                line_y += font_cathegory + y_spacing;
+
+                DrawText(TextFormat("    x: %f", t->pos.x), start_x, line_y, font_property, WHITE);
+                line_y += font_property + y_spacing;
+
+                DrawText(TextFormat("    y: %f", t->pos.y), start_x, line_y, font_property, WHITE);
+                line_y += font_property + y_spacing;
+            }
+            line_y += divider;
+            {
+                DrawText("  Size", start_x, line_y, font_cathegory, WHITE);
+                line_y += font_cathegory + y_spacing;
+
+                DrawText(TextFormat("    x: %f", t->size.x), start_x, line_y, font_property, WHITE);
+                line_y += font_property + y_spacing;
+
+                DrawText(TextFormat("    y: %f", t->size.y), start_x, line_y, font_property, WHITE);
+                line_y += font_property + y_spacing;
+            }
+            line_y += divider;
+
+            switch (t->kind) {
+            case KIND_PLAYER: { } break;
+
+            case KIND_BLOCK: { } break;
+
+            case KIND_DOOR:
+            {
+                DrawText("  Specific", start_x, line_y, font_cathegory, WHITE);
+                line_y += font_cathegory + y_spacing;
+
+                DrawText(TextFormat("    takes to: %lu", t->takes_to), start_x, line_y, font_property, WHITE);
+                line_y += font_property + y_spacing;
+
+                DrawText(TextFormat("    spawn left: %s", t->spawn_left ? "true" : "false"), start_x, line_y, font_property, WHITE);
+                line_y += font_property + y_spacing;
+            } break;
+
+            case KIND_ROOM:
+            case KIND_NIL:
+            case __kinds_count:
+            default:
+                TraceLog(LOG_FATAL, "Unreachable thing kind %d drawing selected thing panel", t->kind);
+                exit(1);
+            }
+        }
+    }
+
+    DrawText(TextFormat("Room %zu", CURRENT_ROOM->id), game.screen_width-100, game.screen_height-25, 20, BLACK);
+
+    if (game.terminal.is_shown) {
+        const float  TERM_SIZE_X = 300.0f;
+        const float  TERM_SIZE_Y = 300.0f;
+        const size_t TERM_LINES  = 10;
+        const float  TERM_LINE_HEIGHT = TERM_SIZE_Y/TERM_LINES;
+        Vector2 term_size = {TERM_SIZE_X, TERM_SIZE_Y};
+        Vector2 term_pos = {game.screen_width-term_size.x, 0};
+        DrawRectangleV(term_pos, term_size, BLACK);
+        for (size_t i = 1; i < TERM_LINES; i++) {
+            float y = term_pos.y+(TERM_LINE_HEIGHT)*i;
+            DrawLineV((Vector2){term_pos.x, y}, (Vector2){term_pos.x+term_size.x, y}, WHITE);
+        }
+
+        const size_t Y_SPACING = 2;
+        const size_t X_SPACING = 4;
+        const size_t FONT_SIZE = TERM_LINE_HEIGHT - 2*Y_SPACING;
+        const float FONT_SPACING = 5.0f;
+        const size_t SIZE = game.terminal.count > TERM_LINES ? TERM_LINES : game.terminal.count;
+        for (size_t i = 0; i < TERM_LINES; i++) {
+            if (game.terminal.count <= i) break;
+            Vector2 line_pos = {term_pos.x + X_SPACING, term_pos.y + Y_SPACING + (TERM_LINE_HEIGHT)*(TERM_LINES-i-1)};
+            String line = game.terminal.items[SIZE-i-1];
+            if (line.count >= 64) {
+                DrawTextEx(GetFontDefault(), "TOO LONG", line_pos, FONT_SIZE, FONT_SPACING, GREEN);
+            } else if (line.count > 0) {
+                DrawTextEx(GetFontDefault(), TextFormat(S_FMT, S_ARG(line)), line_pos, FONT_SIZE, FONT_SPACING, GREEN);
+            }
+        }
+    }
+}
+
+int atoin(const char *str, size_t len) {
+    int res = 0;
+    int sign = 1;
+    size_t i = 0;
+
+    if (len == 0 || str == NULL) return 0;
+
+    if (str[0] == '-') {
+        sign = -1;
+        i++;
+    } else if (str[0] == '+') {
+        i++;
+    }
+
+    for (; i < len; i++) {
+        if (str[i] < '0' || str[i] > '9') {
+            break;
+        }
+        res = res * 10 + (str[i] - '0');
+    }
+
+    return res * sign;
+}
+
+void execute_terminal_command(void)
+{
+    StringView line = sv_from_s(*da_get_last(game.terminal));
+    TraceLog(LOG_INFO, "Execute terminal command \""SV_FMT"\"", SV_ARG(line));
+    da_push(&game.terminal, (String){0});
+
+    line = sv_trim(line);
+    if (line.count == 0) {
+        TraceLog(LOG_WARNING, "Empty command");
+        return;
+    }
+
+    StringView command = sv_chop_by_char(&line, ' ');
+    line = sv_trim_left(line);
+
+    if (sv_eq_cstr(command, "quit")) {
+        check_unsaved_changes();
+        exit(0);
+    } else if (sv_eq_cstr(command, "set")) {
+        if (game.selected_things.count == 0) {
+            TraceLog(LOG_WARNING, "No things selected");
+            return;
+        }
+        Thing *t = get_active_thing();
+        StringView property = sv_chop_by_char(&line, ' ');
+        line = sv_trim_left(line);
+        StringView value = line;
+
+        switch (t->kind) {
+        case KIND_PLAYER:
+        {
+            TraceLog(LOG_WARNING, "TODO: set properties of \"%s\"", thing_kind_to_string(t->kind));
+            return;
+        } break;
+        case KIND_BLOCK:
+        {
+            TraceLog(LOG_WARNING, "TODO: set properties of \"%s\"", thing_kind_to_string(t->kind));
+            return;
+        } break;
+        case KIND_DOOR:
+        {
+            if (sv_eq_cstr(property, "takes_to")) {
+                int v = atoin(value.data, value.count);
+                if (v <= 0) {
+                    TraceLog(LOG_WARNING, "Invalid positive integer value '%d' for property "SV_FMT, v,
+                            SV_ARG(property));
+                    return;
+                }
+                t->takes_to = v;
+            } else if (sv_eq_cstr(property, "spawn_left")) {
+                if (sv_eq_cstr(value, "true")) {
+                    t->spawn_left = true;
+                } else if (sv_eq_cstr(value, "false")) {
+                    t->spawn_left = false;
+                } else {
+                    TraceLog(LOG_WARNING, "Invalid boolean value \""SV_FMT"\" for property "SV_FMT, SV_ARG(value),
+                            SV_ARG(property));
+                    return;
+                }
+            } else {
+                TraceLog(LOG_WARNING, "Unknown property \""SV_FMT"\" for %s", SV_ARG(property), thing_kind_to_string(t->kind));
+                return;
+            }
+        } break;
+        case KIND_ROOM:
+        {
+            TraceLog(LOG_WARNING, "TODO: set properties of \"%s\"", thing_kind_to_string(t->kind));
+            return;
+        } break;
+
+        case KIND_NIL:
+        case __kinds_count:
+        default:
+            TraceLog(LOG_FATAL, "Unreachable thing kind %d setting thing property", t->kind);
+            exit(1);
+        }
+    } else if (sv_eq_cstr(command, "add")) {
+        StringView kind = sv_chop_by_char(&line, ' ');
+
+        if (sv_eq_cstr(kind, "room")) {
+            ThingIdx room_idx = new_room();
+            game.current_room = room_idx;
+        } else if (sv_eq_cstr(kind, "block")) {
+            const Vector2 default_size = {50, 100};
+            ThingIdx block_idx = new_block(
+                GetMousePositionRelativeToCamera(),
+                default_size
+            );
+            add_block_to_room(game.current_room, block_idx);
+        } else if (sv_eq_cstr(kind, "door")) {
+            const Vector2 default_size = {50, 100};
+            const RoomID default_takes_to = NO_ID;
+            const bool default_spawn_left = false;
+            ThingIdx door_idx = new_door(
+                GetMousePositionRelativeToCamera(),
+                default_size,
+                default_takes_to,
+                default_spawn_left
+            );
+            add_block_to_room(game.current_room, door_idx);
+        } else {
+            TraceLog(LOG_WARNING, "Unknown kind \""SV_FMT"\"", SV_ARG(kind));
+            return;
+        }
+    } else {
+        TraceLog(LOG_WARNING, "Unknown command \""SV_FMT"\"", SV_ARG(command));
+        return;
+    }
+}
+
 int main(void)
 {
     InitWindow(800, 600, "Placeholder");
@@ -941,79 +1193,56 @@ int main(void)
 
         dt = GetFrameTime();
 
-        if (!game.adding_thing && IsKeyPressed(KEY_D) && IsKeyPressed(KEY_RIGHT_CONTROL)) game.debug = !game.debug;
-        if (!(IsKeyDown(KEY_LEFT_CONTROL)) && IsKeyPressed(KEY_P)) game.is_paused = !game.is_paused;
-        if (IsKeyPressed(KEY_B)) {
+        if (game.terminal.is_shown) {
+            String *line = NULL;
+            switch (GetKeyPressed()) {
+            case KEY_ENTER:
+                execute_terminal_command();
+                break;
+            case KEY_BACKSPACE:
+                line = da_get_last(game.terminal);
+                if (line->count > 0) s_pop(line);
+                break;
+            default:
+                char c = GetCharPressed();
+                while (c) {
+                    String *line = da_get_last(game.terminal);
+                    s_push(line, c);
+                    c = GetCharPressed();
+                }
+            }
+        } else {
+            if (IsKeyPressed(KEY_RIGHT_CONTROL) && IsKeyPressed(KEY_D)) game.debug = !game.debug;
+            if (!(IsKeyDown(KEY_LEFT_CONTROL)) && IsKeyPressed(KEY_P)) game.is_paused = !game.is_paused;
+            if (IsKeyPressed(KEY_B)) {
+                if (game.state == BUILDING) {
+                    game.camera.zoom = 1.f;
+                    game.state = PLAYING;
+                    da_clear(&game.selected_things);
+                } else if (game.state == PLAYING) game.state = BUILDING;
+            }
+
             if (game.state == BUILDING) {
-                game.camera.zoom = 1.f;
-                game.state = PLAYING;
-                da_clear(&game.selected_things);
-            } else if (game.state == PLAYING) game.state = BUILDING;
+                building_mode();
+            }
         }
 
-        if (game.state == BUILDING) {
-            building_mode();
+        if (IsKeyDown(KEY_RIGHT_CONTROL) && IsKeyPressed(KEY_T)) {
+            game.terminal.is_shown = !game.terminal.is_shown;
         }
 
-        if (!game.is_paused) player_update(dt);
-        camera_update();
+        update(dt);
 
         BeginDrawing();
         ClearBackground(GRAY);
 
         BeginMode2D(game.camera);
 
-        room_draw();
-        player_draw();
-
-        if (game.state == BUILDING) {
-            if (game.selected_things.count > 0) {
-                for (size_t i = 0; i < game.selected_things.count; i++) {
-                    ThingIdx idx = game.selected_things.items[i];
-                    Thing *t = get_thing(idx);
-
-                    DrawRectangleLinesEx(rect(t), 3, BLACK);
-                    DrawRectangleLinesEx((Rectangle){t->pos.x+1, t->pos.y+1, t->size.x-2, t->size.y-2}, 1, RED);
-                }
-            }
-        }
+        draw();
 
         EndMode2D();
 
-        if (game.is_paused) DrawText("PAUSE", game.screen_width-100, 10, 20, BLACK);
-        if (game.debug) {
-            DrawText("DEBUG", game.screen_width-100, 30, 20, BLACK);
-
-            size_t line = 1;
-            char buffer[64];
-            sprintf(buffer, "FPS: %d", GetFPS());
-            DrawText(buffer, 25, 25*line++, 20, BLACK);
-            memset(buffer, 0, sizeof(buffer));
-
-            Vector2 mouse = GetMousePosition();
-            sprintf(buffer, "mouse abs: (%.2f, %.2f)", mouse.x, mouse.y);
-            DrawText(buffer, 25, 25*line++, 20, BLACK);
-            memset(buffer, 0, sizeof(buffer));
-
-            mouse = GetMousePositionRelativeToCamera();
-            sprintf(buffer, "mouse rel: (%.2f, %.2f)", mouse.x, mouse.y);
-            DrawText(buffer, 25, 25*line++, 20, BLACK);
-        }
-        if (game.state == BUILDING) {
-            DrawText("BUILDING", game.screen_width-100, 50, 20, BLACK);
-            if (game.adding_thing) {
-                size_t line = 1;
-                size_t inv_line = 3;
-                DrawText(TextFormat("room  (%zu)", inv_line--), 10, game.screen_height - 25*line++, 20, BLACK);
-                DrawText(TextFormat("door  (%zu)", inv_line--), 10, game.screen_height - 25*line++, 20, BLACK);
-                DrawText(TextFormat("block (%zu)", inv_line--), 10, game.screen_height - 25*line++, 20, BLACK);
-                DrawText("ADD",        10, game.screen_height - 25*line++, 20, BLACK);
-            }
-        }
-
-        char buffer[64];
-        sprintf(buffer, "Room %zu", current_room);
-        DrawText(buffer, game.screen_width-100, game.screen_height-25, 20, BLACK);
+        ui();
 
         EndDrawing();
     }
