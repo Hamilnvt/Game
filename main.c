@@ -1,6 +1,12 @@
 // TODO:
-// terminal
-// > set_checkpoint (to player position, or to mouse?)
+// terminal:
+// - show messaged one line below input
+// trace:
+// - highlight each connection and "validate" it (check collisions): change colour if invalid -> death after a certain time
+// - capire come usarla:
+//     > punti minimi da cui passare per completare il livello (miglior punteggio con il minor numero di punti)
+//     > disegni da completare
+//     > interazione con gli altri oggetti (circondare, intrappolare, ...)
 
 #include <stddef.h>
 #include <stdio.h>
@@ -122,7 +128,18 @@ typedef struct
     ThingIdx first_door;
     ThingIdx next_door;
 
+    Vector2 checkpoint;
+
 } Thing;
+
+typedef struct
+{
+    Vector2 *items;
+    size_t count;
+    size_t capacity;
+    float timer;
+    bool triggered;
+} Trace;
 
 typedef struct
 {
@@ -156,9 +173,10 @@ typedef struct
     size_t screen_height;
     Camera2D camera;
     ThingIdx player;
-    Vector2 checkpoint; // TODO
     ThingIdx current_room;
     float gravity;
+
+    Trace trace;
 
     struct {
         bool is_shown;
@@ -338,6 +356,8 @@ void add_door_to_room(ThingIdx room_idx, ThingIdx door_idx)
 
 #define COYOTE_TIMER 0.10f
 #define DISABLED_MOVEMENTS_TIMER 0.5f
+#define TRACE_TIMER 2.0f
+#define TRACE_POINT_RADIUS 10
 
 ///
 
@@ -411,6 +431,11 @@ bool save_rooms_to_json(void)
 
             door_idx = door->next_door;
         }
+
+        cJSON *jcheckpoint = cJSON_CreateObject();
+        cJSON_AddNumberToObject(jcheckpoint, "x", room->checkpoint.x);
+        cJSON_AddNumberToObject(jcheckpoint, "y", room->checkpoint.y);
+        cJSON_AddItemToObject(jroom, "checkpoint", jcheckpoint);
     }
 
     char *printed = cJSON_Print(root); // pretty print, use cJSON_PrintUnformatted for compact
@@ -484,7 +509,6 @@ bool load_rooms_from_json(void)
     for (int i = 0; i < cJSON_GetArraySize(jrooms); i++) {
         cJSON *jroom = cJSON_GetArrayItem(jrooms, i);
         if (!jroom) {
-            cJSON_Delete(jrooms);
             TraceLog(LOG_WARNING, "Couldn't get room json object %d\n", i);
             return false;
         }
@@ -493,12 +517,12 @@ bool load_rooms_from_json(void)
         if (game.current_room == NIL) {
             game.current_room = room_idx; // TODO: will this be always true?
         }
+        Thing *room = get_thing(room_idx);
 
         cJSON *jblocks = cJSON_GetObjectItemCaseSensitive(jroom, "blocks");
         if (jblocks && cJSON_IsArray(jblocks)) {
             fill_list_from_json_array(jblocks, room_idx, block);
         } else {
-            cJSON_Delete(jrooms);
             TraceLog(LOG_WARNING, "Couldn't parse blocks json in room %d\n", i);
             return false;
         }
@@ -507,9 +531,15 @@ bool load_rooms_from_json(void)
         if (jdoors && cJSON_IsArray(jdoors)) {
             fill_list_from_json_array(jdoors, room_idx, door);
         } else {
-            cJSON_Delete(jrooms);
             TraceLog(LOG_WARNING, "Couldn't parse doors json in room %d\n", i);
             return false;
+        }
+
+        cJSON *jcheckpoint = cJSON_GetObjectItemCaseSensitive(jroom, "checkpoint");
+        if (jcheckpoint) {
+            room->checkpoint = cJSON_GetVector2(jroom, "checkpoint");
+        } else {
+            room->checkpoint = (Vector2){0, 0};
         }
     }
 
@@ -592,37 +622,48 @@ void room_draw()
 /// Player Functions
 static inline Vector2 GetMousePositionRelativeToCamera(void) { return GetScreenToWorld2D(GetMousePosition(), game.camera); }
 
-// TODO: save room id as well, then save/load from savefile
 void set_checkpoint(Vector2 checkpoint)
 {
-    game.checkpoint = checkpoint;
+    CURRENT_ROOM->checkpoint = checkpoint;
 }
 void player_respawn(void)
 {
-    PLAYER->pos = game.checkpoint;
+    PLAYER->pos = CURRENT_ROOM->checkpoint;
 }
 
 void player_init(void)
 {
-    Vector2 pos  = {200.f, 400.f};
+    Vector2 pos  = CURRENT_ROOM->checkpoint;
     Vector2 size = {25.f, 50.f};
     Vector2 vel  = {PLAYER_VELOCITY, 0.f};
 
     game.player = new_player(pos, size, vel);
     
-    PLAYER->pos  = (Vector2){200.f, 400.f};
-    PLAYER->size = (Vector2){25.f, 50.f};
-    PLAYER->vel  = (Vector2){PLAYER_VELOCITY, 0.f};
-
     game.camera.target = Vector2Add(PLAYER->pos, Vector2Scale(PLAYER->size, .5f));
-
-    set_checkpoint((Vector2){200, 300});
 }
 
 void player_draw(void)
 {
-    if (game.debug) DrawRectangleLines(PLAYER->pos.x, PLAYER->pos.y, PLAYER->size.x, PLAYER->size.y, DARKBLUE); 
-    else DrawRectangleV(PLAYER->pos, PLAYER->size, DARKBLUE); 
+    if (game.debug) {
+        DrawRectangleLines(PLAYER->pos.x, PLAYER->pos.y, PLAYER->size.x, PLAYER->size.y, DARKBLUE); 
+        for (size_t i = 0; i < game.trace.count; i++) {
+            DrawCircleV(game.trace.items[i], TRACE_POINT_RADIUS, GREEN);
+            if (i > 0) {
+                DrawLineEx(game.trace.items[i-1], game.trace.items[i], 5, GREEN);
+            }
+        }
+    } else {
+        DrawRectangleV(PLAYER->pos, PLAYER->size, DARKBLUE); 
+
+        if (!da_is_empty(&game.trace)) {
+            for (size_t i = 0; i < game.trace.count; i++) {
+                DrawCircleV(game.trace.items[i], TRACE_POINT_RADIUS, GREEN);
+                if (game.trace.triggered && i > 0) {
+                    DrawLineEx(game.trace.items[i-1], game.trace.items[i], 5, GREEN);
+                }
+            }
+        }
+    }
 }
 
 Thing *player_check_door_collision()
@@ -635,6 +676,55 @@ Thing *player_check_door_collision()
         door_idx = d->next_door;
     }
     return THING_NIL;
+}
+
+void player_die(void)
+{
+    PLAYER->vel.y = 0;
+    PLAYER->disabled_movements_timer = DISABLED_MOVEMENTS_TIMER;
+    da_clear(&game.trace);
+    player_respawn();
+}
+
+bool check_collision_line_rect(Vector2 v1, Vector2 v2, Rectangle r)
+{
+    if (CheckCollisionPointRec(v1, r) || CheckCollisionPointRec(v2, r)) {
+        return true;
+    }
+
+    Vector2 top_left     = {r.x,           r.y};
+    Vector2 top_right    = {r.x + r.width, r.y};
+    Vector2 bottom_left  = {r.x,           r.y + r.height};
+    Vector2 bottom_right = {r.x + r.width, r.y + r.height};
+
+    return CheckCollisionLines(v1, v2, top_left, top_right, NULL)
+        || CheckCollisionLines(v1, v2, top_right, bottom_right, NULL)
+        || CheckCollisionLines(v1, v2, bottom_right, bottom_left, NULL)
+        || CheckCollisionLines(v1, v2, bottom_left, top_left, NULL);
+}
+
+void trigger_trace(void)
+{
+    game.trace.triggered = true;
+    game.trace.timer = TRACE_TIMER;
+
+    for (size_t i = 1; i < game.trace.count; i++) {
+        Vector2 v1 = game.trace.items[i-1];
+        Vector2 v2 = game.trace.items[i];
+
+        ThingIdx block_idx = CURRENT_ROOM->first_block;
+        while (block_idx != NIL) {
+            Thing *block = get_thing(block_idx);
+            Rectangle b_rect = rect(block);
+
+            if (check_collision_line_rect(v1, v2, b_rect)) {
+                player_die();
+            }
+
+            block_idx = block->next_block;
+        }
+
+    }
 }
 
 void player_handle_controls()
@@ -650,6 +740,17 @@ void player_handle_controls()
         PLAYER->direction = DIR_RIGHT;
     }
 
+    // TODO
+    //if (IsKeyPressed(KEY_L)) {
+    //    if (PLAYER->direction == DIR_LEFT) {
+    //        PLAYER->pos.x -= 100.0f;
+    //    } else if (PLAYER->direction == DIR_RIGHT) {
+    //        PLAYER->pos.x += 100.0f;
+    //    } else {
+    //        PLAYER->pos.y -= 100.0f;
+    //    }
+    //}
+
     if (IsKeyDown(KEY_S) && !PLAYER->is_grounded) {
         PLAYER->vel.y += GROUND_YOURSELF_FORCE;
     }
@@ -659,13 +760,25 @@ void player_handle_controls()
         PLAYER->coyote_timer = 0;
         PLAYER->vel.y = -JUMP_FORCE;
     }
-}
 
-void player_die(void)
-{
-    player_respawn();
-    PLAYER->vel.y = 0;
-    PLAYER->disabled_movements_timer = DISABLED_MOVEMENTS_TIMER;
+    if (IsKeyPressed(KEY_J)) {
+        if (!game.trace.triggered) {
+            Vector2 point = {PLAYER->pos.x + PLAYER->size.x/2, PLAYER->pos.y + PLAYER->size.y/2};
+            if (!da_is_empty(&game.trace)) {
+                Vector2 first = game.trace.items[0];
+                if (CheckCollisionCircles(point, 2*TRACE_POINT_RADIUS, first, 2*TRACE_POINT_RADIUS)) {
+                    if (game.trace.count > 1) {
+                        da_push(&game.trace, first);
+                        trigger_trace();
+                    }
+                } else da_push(&game.trace, point);
+            } else da_push(&game.trace, point);
+        }
+    }
+
+    if (IsKeyPressed(KEY_K)) {
+        trigger_trace();
+    }
 }
 
 void player_move_and_collide_y(float dt)
@@ -806,6 +919,15 @@ void player_update(float dt)
         return;
     }
 
+    if (game.trace.triggered) {
+        if (game.trace.timer > 0) {
+            game.trace.timer -= dt;
+        } else {
+            game.trace.triggered = false;
+            da_clear(&game.trace);
+        }
+    }
+
     if (game.state == PLAYING && !game.terminal.is_shown) player_handle_controls();
     player_move_and_collide_x(dt);
     player_check_move_through_door();
@@ -860,7 +982,7 @@ void game_init(void)
 
     player_init();
 
-    da_push(&game.terminal, (String){0}); // First empty terminal
+    da_push(&game.terminal, (String){0}); // First empty terminal line
 }
 ///
 
@@ -1066,7 +1188,7 @@ void ui(void)
     if (game.terminal.is_shown) {
         const float  TERM_SIZE_X = 300.0f;
         const float  TERM_SIZE_Y = 300.0f;
-        const size_t TERM_LINES  = 10;
+        const size_t TERM_LINES  = 12;
         const float  TERM_LINE_HEIGHT = TERM_SIZE_Y/TERM_LINES;
         Vector2 term_size = {TERM_SIZE_X, TERM_SIZE_Y};
         Vector2 term_pos = {game.screen_width-term_size.x, 0};
@@ -1136,6 +1258,8 @@ void execute_terminal_command(void)
     if (sv_eq_cstr(command, "quit")) {
         check_unsaved_changes();
         exit(0);
+    } else if (sv_eq_cstr(command, "set_checkpoint")) {
+        set_checkpoint(PLAYER->pos);
     } else if (sv_eq_cstr(command, "set")) {
         if (game.selected_things.count == 0) {
             TraceLog(LOG_WARNING, "No things selected");
@@ -1172,6 +1296,7 @@ void execute_terminal_command(void)
                 if (sv_eq_cstr(value, "solid")) {
                     trait = BLOCK_SOLID;
                 } else if (sv_eq_cstr(value, "invisible")) {
+                    TraceLog(LOG_INFO, "Adding invisible trait");
                     trait = BLOCK_INVISIBLE;
                 } else if (sv_eq_cstr(value, "dangerous")) {
                     trait = BLOCK_DANGEROUS;
@@ -1249,10 +1374,15 @@ void execute_terminal_command(void)
                 default_takes_to,
                 default_spawn_left
             );
-            add_block_to_room(game.current_room, door_idx);
+            add_door_to_room(game.current_room, door_idx);
         } else {
             TraceLog(LOG_WARNING, "Unknown kind \""SV_FMT"\"", SV_ARG(kind));
             return;
+        }
+    } else if (sv_eq_cstr(command, "delete")) {
+        for (size_t i = 0; i < game.selected_things.count; i++) {
+            remove_thing(game.selected_things.items[i]);
+            da_clear(&game.selected_things);
         }
     } else {
         TraceLog(LOG_WARNING, "Unknown command \""SV_FMT"\"", SV_ARG(command));
@@ -1262,7 +1392,7 @@ void execute_terminal_command(void)
 
 int main(void)
 {
-    InitWindow(800, 600, "Placeholder");
+    InitWindow(1920, 1080, "Placeholder");
     SetWindowState(/*FLAG_FULLSCREEN_MODE | */FLAG_WINDOW_RESIZABLE);
     SetTargetFPS(60);
 
