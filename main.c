@@ -2,11 +2,15 @@
 // terminal:
 // - show messaged one line below input
 // trace:
+// - if two points would overlap do not place the new point
 // - highlight each connection and "validate" it (check collisions): change colour if invalid -> death after a certain time
+// - disable player while following trace
+// - mark last point
 // - capire come usarla:
 //     > punti minimi da cui passare per completare il livello (miglior punteggio con il minor numero di punti)
 //     > disegni da completare
 //     > interazione con gli altri oggetti (circondare, intrappolare, ...)
+// - connect dots with splines (seems hard)
 
 #include <stddef.h>
 #include <stdio.h>
@@ -138,7 +142,9 @@ typedef struct
     size_t count;
     size_t capacity;
     float timer;
+    float max_time;
     bool triggered;
+    int step;
 } Trace;
 
 typedef struct
@@ -356,7 +362,9 @@ void add_door_to_room(ThingIdx room_idx, ThingIdx door_idx)
 
 #define COYOTE_TIMER 0.10f
 #define DISABLED_MOVEMENTS_TIMER 0.5f
-#define TRACE_TIMER 2.0f
+#define TRACE_STEP_INITIAL_TIMER 0.4f
+#define TRACE_STEP_TIMER_REDUCTION 0.9f
+#define TRACE_STEP_MIN_TIMER 0.1f
 #define TRACE_POINT_RADIUS 10
 
 ///
@@ -646,9 +654,10 @@ void player_draw(void)
 {
     if (game.debug) {
         DrawRectangleLines(PLAYER->pos.x, PLAYER->pos.y, PLAYER->size.x, PLAYER->size.y, DARKBLUE); 
-        for (size_t i = 0; i < game.trace.count; i++) {
+
+        for (int i = game.trace.count-1; i >= 0; i--) {
             DrawCircleV(game.trace.items[i], TRACE_POINT_RADIUS, GREEN);
-            if (i > 0) {
+            if (i > 0 && i <= game.trace.step) {
                 DrawLineEx(game.trace.items[i-1], game.trace.items[i], 5, GREEN);
             }
         }
@@ -656,10 +665,16 @@ void player_draw(void)
         DrawRectangleV(PLAYER->pos, PLAYER->size, DARKBLUE); 
 
         if (!da_is_empty(&game.trace)) {
-            for (size_t i = 0; i < game.trace.count; i++) {
-                DrawCircleV(game.trace.items[i], TRACE_POINT_RADIUS, GREEN);
-                if (game.trace.triggered && i > 0) {
-                    DrawLineEx(game.trace.items[i-1], game.trace.items[i], 5, GREEN);
+            for (int i = game.trace.count-1; i >= 0; i--) {
+                Vector2 v1 = game.trace.items[i];
+                DrawCircleV(v1, TRACE_POINT_RADIUS, GREEN);
+                if (i == game.trace.step) {
+                    float alfa = game.trace.timer / game.trace.max_time;
+                    if (alfa > 1) alfa = 1;
+                    Vector2 v2 = Vector2Lerp(v1, game.trace.items[i-1], alfa);
+                    DrawLineEx(v2, v1, 5, GREEN);
+                } else if (game.trace.triggered && i > 0 && i > game.trace.step) {
+                    DrawLineEx(game.trace.items[i-1], v1, 5, GREEN);
                 }
             }
         }
@@ -697,34 +712,18 @@ bool check_collision_line_rect(Vector2 v1, Vector2 v2, Rectangle r)
     Vector2 bottom_left  = {r.x,           r.y + r.height};
     Vector2 bottom_right = {r.x + r.width, r.y + r.height};
 
-    return CheckCollisionLines(v1, v2, top_left, top_right, NULL)
-        || CheckCollisionLines(v1, v2, top_right, bottom_right, NULL)
-        || CheckCollisionLines(v1, v2, bottom_right, bottom_left, NULL)
-        || CheckCollisionLines(v1, v2, bottom_left, top_left, NULL);
+    return CheckCollisionLines(v1, v2, top_left,     top_right,    NULL)
+        || CheckCollisionLines(v1, v2, top_right,    bottom_right, NULL)
+        || CheckCollisionLines(v1, v2, bottom_right, bottom_left,  NULL)
+        || CheckCollisionLines(v1, v2, bottom_left,  top_left,     NULL);
 }
 
 void trigger_trace(void)
 {
     game.trace.triggered = true;
-    game.trace.timer = TRACE_TIMER;
-
-    for (size_t i = 1; i < game.trace.count; i++) {
-        Vector2 v1 = game.trace.items[i-1];
-        Vector2 v2 = game.trace.items[i];
-
-        ThingIdx block_idx = CURRENT_ROOM->first_block;
-        while (block_idx != NIL) {
-            Thing *block = get_thing(block_idx);
-            Rectangle b_rect = rect(block);
-
-            if (check_collision_line_rect(v1, v2, b_rect)) {
-                player_die();
-            }
-
-            block_idx = block->next_block;
-        }
-
-    }
+    game.trace.max_time = TRACE_STEP_INITIAL_TIMER;
+    game.trace.timer = 0;
+    game.trace.step = game.trace.count - 1;
 }
 
 void player_handle_controls()
@@ -777,7 +776,7 @@ void player_handle_controls()
     }
 
     if (IsKeyPressed(KEY_K)) {
-        trigger_trace();
+        if (game.trace.count > 1) trigger_trace();
     }
 }
 
@@ -920,11 +919,36 @@ void player_update(float dt)
     }
 
     if (game.trace.triggered) {
-        if (game.trace.timer > 0) {
-            game.trace.timer -= dt;
+        Vector2 v1 = game.trace.items[game.trace.step-1];
+        float alfa = game.trace.timer / game.trace.max_time;
+        if (alfa > 1) alfa = 1;
+        Vector2 v2 = Vector2Lerp(v1, game.trace.items[game.trace.step], alfa);
+
+        ThingIdx block_idx = CURRENT_ROOM->first_block;
+        while (block_idx != NIL) {
+            Thing *block = get_thing(block_idx);
+
+            if (check_collision_line_rect(v1, v2, rect(block))) {
+                game.trace.timer = 0;
+                game.trace.step = -1;
+                player_die();
+            }
+
+            block_idx = block->next_block;
+        }
+
+        if (game.trace.timer < game.trace.max_time) {
+            game.trace.timer += dt;
         } else {
-            game.trace.triggered = false;
-            da_clear(&game.trace);
+            if (game.trace.step > 0) {
+                game.trace.timer = 0;
+                game.trace.max_time *= TRACE_STEP_TIMER_REDUCTION;
+                if (game.trace.max_time < TRACE_STEP_MIN_TIMER) game.trace.max_time = TRACE_STEP_MIN_TIMER;
+                game.trace.step--;
+            } else {
+                game.trace.triggered = false;
+                da_clear(&game.trace);
+            }
         }
     }
 
@@ -944,7 +968,14 @@ void camera_update(void)
         if (IsKeyDown(KEY_W)) game.camera.target.y -= 10;
         if (IsKeyDown(KEY_S)) game.camera.target.y += 10;
     } else {
-        game.camera.target = Vector2Add(PLAYER->pos, Vector2Scale(PLAYER->size, .5f));
+        if (game.trace.triggered) {
+            Vector2 v1 = game.trace.items[game.trace.step];
+            float alfa = game.trace.timer / game.trace.max_time;
+            if (alfa > 1) alfa = 1;
+            game.camera.target = Vector2Lerp(v1, game.trace.items[game.trace.step-1], alfa);
+        } else {
+            game.camera.target = Vector2Add(PLAYER->pos, Vector2Scale(PLAYER->size, .5f));
+        }
     }
 }
 ///
